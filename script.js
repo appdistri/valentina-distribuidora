@@ -99,7 +99,11 @@ const DIAS_VISITA = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"];
 // Interruptor del "día de visita". En false se oculta en toda la app (filtros,
 // ficha, formulario, carga masiva y mapa). Los datos ya cargados no se borran:
 // si lo volvés a poner en true, reaparecen tal cual estaban.
-const USAR_DIAS_VISITA = false;
+const USAR_DIAS_VISITA = true;
+// Fila de pestañas "Todos / Lunes ... Viernes / Sin asignar" arriba de la lista
+// de Clientes. En false se oculta SOLO esa fila; el día de visita sigue en la
+// ficha, el formulario, inactivos y el mapa.
+const MOSTRAR_FILA_DIAS_CLIENTES = false;
 const HORARIOS_CLIENTE = ["Mañana", "Tarde", "Todo el día", "Corrido"];
 
 // ── Configuración del negocio ────────────────────────────────────────────────
@@ -665,7 +669,7 @@ function clientesFiltrados() {
     lista = lista.filter(c => tiposSeleccionados.has(c.tipo || "Otro"));
   }
 
-  if (USAR_DIAS_VISITA && filtroDiaCliente !== "Todos") {
+  if (USAR_DIAS_VISITA && MOSTRAR_FILA_DIAS_CLIENTES && filtroDiaCliente !== "Todos") {
     lista = lista.filter(c => (c.diaVisita || "Sin asignar") === filtroDiaCliente);
   }
 
@@ -2620,7 +2624,7 @@ function renderVistaClientes() {
       `).join("")}
     </div>
 
-    ${USAR_DIAS_VISITA ? `
+    ${USAR_DIAS_VISITA && MOSTRAR_FILA_DIAS_CLIENTES ? `
     <div class="tipo-tabs">
       ${["Todos", ...DIAS_VISITA, "Sin asignar"].map(d => `
         <button class="tipo-tab ${filtroDiaCliente === d ? "active" : ""}" onclick="setFiltroDia('${d}')">${d}</button>
