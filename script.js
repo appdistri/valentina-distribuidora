@@ -96,6 +96,10 @@ const STORAGE_KEYS = {
 };
 const TIPOS_CLIENTE = ["Farmacia", "Dietética", "Supermercado", "Verdulería", "Kiosco", "Gimnasio", "Otro"];
 const DIAS_VISITA = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"];
+// Interruptor del "día de visita". En false se oculta en toda la app (filtros,
+// ficha, formulario, carga masiva y mapa). Los datos ya cargados no se borran:
+// si lo volvés a poner en true, reaparecen tal cual estaban.
+const USAR_DIAS_VISITA = false;
 const HORARIOS_CLIENTE = ["Mañana", "Tarde", "Todo el día", "Corrido"];
 
 // ── Configuración del negocio ────────────────────────────────────────────────
@@ -520,7 +524,7 @@ function verDatosCliente() {
   const filas = [
     ["Tipo", c.tipo || "Otro"],
     ["Zona", c.zona || "—"],
-    ["Día de visita", c.diaVisita || "Sin asignar"],
+    ...(USAR_DIAS_VISITA ? [["Día de visita", c.diaVisita || "Sin asignar"]] : []),
     ["Horario", c.horario || "—"],
     ["Frecuencia", frecuenciaTxto],
     ["Teléfono", c.telefono || "—"],
@@ -661,7 +665,7 @@ function clientesFiltrados() {
     lista = lista.filter(c => tiposSeleccionados.has(c.tipo || "Otro"));
   }
 
-  if (filtroDiaCliente !== "Todos") {
+  if (USAR_DIAS_VISITA && filtroDiaCliente !== "Todos") {
     lista = lista.filter(c => (c.diaVisita || "Sin asignar") === filtroDiaCliente);
   }
 
@@ -759,7 +763,10 @@ function usarMiUbicacion() {
 function guardarCliente() {
   const nombre     = document.getElementById("formClienteNombre").value.trim();
   const tipo       = document.getElementById("formClienteTipo").value;
-  const diaVisita  = document.getElementById("formClienteDia")?.value || "";
+  // Con los días apagados no hay selector: se conserva el día que ya tuviera el cliente.
+  const diaVisita  = USAR_DIAS_VISITA
+    ? (document.getElementById("formClienteDia")?.value || "")
+    : ((editandoClienteId && clients.find(x => x.id === editandoClienteId)?.diaVisita) || "");
   const zona       = document.getElementById("formClienteZona")?.value.trim() || "";
   const horario    = document.getElementById("formClienteHorario")?.value || "";
   const frecuencia = Number(document.getElementById("formClienteFrecuencia")?.value) || 7;
@@ -2510,15 +2517,15 @@ function renderVistaCargaMasiva() {
     <div class="form-card">
       <p class="muted" style="margin-bottom:10px;">
         Escribí un cliente por línea, separando los datos con comas, en este orden:<br>
-        <strong>Nombre, Teléfono, Tipo, Día de visita</strong><br><br>
-        Teléfono, Tipo y Día son opcionales (podés dejarlos vacíos, pero no te olvides de las comas).
+        <strong>${USAR_DIAS_VISITA ? "Nombre, Teléfono, Tipo, Día de visita" : "Nombre, Teléfono, Tipo"}</strong><br><br>
+        ${USAR_DIAS_VISITA ? "Teléfono, Tipo y Día" : "Teléfono y Tipo"} son opcionales (podés dejarlos vacíos, pero no te olvides de las comas).
         Tipo tiene que ser uno de: ${TIPOS_CLIENTE.join(", ")}.
-        Día tiene que ser uno de: ${DIAS_VISITA.join(", ")}.
+        ${USAR_DIAS_VISITA ? "Día tiene que ser uno de: " + DIAS_VISITA.join(", ") + "." : ""}
       </p>
       <div class="form-group">
-        <textarea id="textoCargaMasiva" rows="14" placeholder="Farmacia San Martín, 3415551234, Farmacia, Lunes
-Dietética Vida Sana, , Dietética, Martes
-Kiosco Don Pepe, 3415559999, Kiosco, Lunes"></textarea>
+        <textarea id="textoCargaMasiva" rows="14" placeholder="${USAR_DIAS_VISITA
+          ? "Farmacia San Martín, 3415551234, Farmacia, Lunes\nDietética Vida Sana, , Dietética, Martes\nKiosco Don Pepe, 3415559999, Kiosco, Lunes"
+          : "Farmacia San Martín, 3415551234, Farmacia\nDietética Vida Sana, , Dietética\nKiosco Don Pepe, 3415559999, Kiosco"}"></textarea>
       </div>
       <button class="btn-primary btn-full" onclick="procesarCargaMasiva()">✅ Cargar todos</button>
       <div id="resultadoCargaMasiva" class="muted" style="margin-top:10px;"></div>
@@ -2541,7 +2548,7 @@ function procesarCargaMasiva() {
 
     const telefono = partes[1] || "";
     let tipoTexto = (partes[2] || "").trim();
-    let diaTexto  = (partes[3] || "").trim();
+    let diaTexto  = USAR_DIAS_VISITA ? (partes[3] || "").trim() : "";
 
     let tipo = TIPOS_CLIENTE.find(t => t.toLowerCase() === tipoTexto.toLowerCase());
     if (!tipo) {
@@ -2613,11 +2620,12 @@ function renderVistaClientes() {
       `).join("")}
     </div>
 
+    ${USAR_DIAS_VISITA ? `
     <div class="tipo-tabs">
       ${["Todos", ...DIAS_VISITA, "Sin asignar"].map(d => `
         <button class="tipo-tab ${filtroDiaCliente === d ? "active" : ""}" onclick="setFiltroDia('${d}')">${d}</button>
       `).join("")}
-    </div>
+    </div>` : ""}
 
     ${(() => {
       const zonasUsadas = [...new Set(clients.filter(c => !c.eliminado).map(c => c.zona).filter(Boolean))].sort();
@@ -2689,7 +2697,7 @@ function renderVistaInactivos() {
     .sort((a, b) => b.dias - a.dias);
 
   const inactivos = inactivosTodos.filter(c => {
-    if (filtroDiaInactivos === "Todos") return true;
+    if (!USAR_DIAS_VISITA || filtroDiaInactivos === "Todos") return true;
     if (filtroDiaInactivos === "Sin asignar") return !c.diaVisita;
     return c.diaVisita === filtroDiaInactivos;
   });
@@ -2700,11 +2708,12 @@ function renderVistaInactivos() {
       <h2 class="page-title2">⏰ Clientes inactivos</h2>
     </div>
 
+    ${USAR_DIAS_VISITA ? `
     <div class="tipo-tabs">
       ${["Todos", ...DIAS_VISITA, "Sin asignar"].map(d => `
         <button class="tipo-tab ${filtroDiaInactivos === d ? "active" : ""}" onclick="cambiarFiltroDiaInactivos('${d}')">${d}</button>
       `).join("")}
-    </div>
+    </div>` : ""}
 
     ${inactivos.length === 0
       ? `<div class="empty-state">${filtroDiaInactivos === "Todos"
@@ -2720,7 +2729,7 @@ function renderVistaInactivos() {
                 ${c.nombre}
                 <span class="badge-sin-comprar">⏰ ${c.dias}d</span>
               </div>
-              <div class="client-sub">${c.tipo || "Otro"}${c.diaVisita ? " · 📆 " + c.diaVisita : ""}${c.horario ? " · 🕐 " + c.horario : ""}${c.telefono ? " · " + c.telefono : ""}</div>
+              <div class="client-sub">${c.tipo || "Otro"}${USAR_DIAS_VISITA && c.diaVisita ? " · 📆 " + c.diaVisita : ""}${c.horario ? " · 🕐 " + c.horario : ""}${c.telefono ? " · " + c.telefono : ""}</div>
             </div>
             ${c.telefono ? `<button class="btn-recordatorio" onclick="event.stopPropagation(); abrirWhatsAppCliente('${c.id}')" title="Escribirle por WhatsApp">💬</button>` : ''}
             <span class="client-arrow">›</span>
@@ -2755,7 +2764,7 @@ function renderVistaPotenciales() {
             <div class="client-tipo-dot tipo-${(c.tipo || 'Otro').toLowerCase().replace('é','e').replace('ú','u')}"></div>
             <div class="client-info">
               <div class="client-name">${c.nombre}</div>
-              <div class="client-sub">${c.tipo || "Otro"}${c.diaVisita ? " · 📆 " + c.diaVisita : " · sin día asignado"}${c.horario ? " · 🕐 " + c.horario : ""}${c.telefono ? " · " + c.telefono : ""}</div>
+              <div class="client-sub">${c.tipo || "Otro"}${USAR_DIAS_VISITA ? (c.diaVisita ? " · 📆 " + c.diaVisita : " · sin día asignado") : ""}${c.horario ? " · 🕐 " + c.horario : ""}${c.telefono ? " · " + c.telefono : ""}</div>
               ${c.seguimiento ? `<div class="muted" style="font-size:12px; margin-top:2px;">📝 ${c.seguimiento}</div>` : ""}
             </div>
             ${c.telefono ? `<button class="btn-recordatorio" onclick="event.stopPropagation(); abrirWhatsAppCliente('${c.id}')" title="Escribirle por WhatsApp">💬</button>` : ''}
@@ -2946,7 +2955,7 @@ function inicializarMapaRutas() {
 
   routeClients.forEach(c => {
     const seleccionado = clientesSeleccionadosMapa.has(c.id);
-    const color = seleccionado ? '#fbbf24' : (DIAS_COLOR[c.diaVisita || ""] || DIAS_COLOR[""]);
+    const color = seleccionado ? '#fbbf24' : (USAR_DIAS_VISITA ? (DIAS_COLOR[c.diaVisita || ""] || DIAS_COLOR[""]) : "#3b82f6");
     const marker = L.circleMarker([Number(c.lat), Number(c.lng)], {
       radius: seleccionado ? 11 : 8,
       fillColor: color,
@@ -2954,8 +2963,8 @@ function inicializarMapaRutas() {
       weight: seleccionado ? 2 : 1,
       fillOpacity: 0.9
     }).addTo(mapaRutasInstancia);
-    marker.bindPopup(`<strong>${c.nombre}</strong><br>${c.direccion || ""}<br>${c.diaVisita ? "Día actual: " + c.diaVisita : "Sin día asignado"}`);
-    marker.on("click", () => toggleClienteMapa(c.id));
+    marker.bindPopup(`<strong>${c.nombre}</strong><br>${c.direccion || ""}${USAR_DIAS_VISITA ? "<br>" + (c.diaVisita ? "Día actual: " + c.diaVisita : "Sin día asignado") : ""}`);
+    if (USAR_DIAS_VISITA) marker.on("click", () => toggleClienteMapa(c.id));
     mapaRutasMarkers[c.id] = marker;
   });
 
@@ -2975,7 +2984,7 @@ function actualizarMarcadorMapa(clienteId) {
   const c = clients.find(x => x.id === clienteId);
   if (!marker || !c) return;
   const seleccionado = clientesSeleccionadosMapa.has(clienteId);
-  const color = seleccionado ? '#fbbf24' : (DIAS_COLOR[c.diaVisita || ""] || DIAS_COLOR[""]);
+  const color = seleccionado ? '#fbbf24' : (USAR_DIAS_VISITA ? (DIAS_COLOR[c.diaVisita || ""] || DIAS_COLOR[""]) : "#3b82f6");
   marker.setStyle({ fillColor: color, radius: seleccionado ? 11 : 8, weight: seleccionado ? 2 : 1 });
 }
 
@@ -3042,11 +3051,11 @@ function renderVistaMapaRutas() {
   cont.innerHTML = `
     <div class="page-header">
       <button class="btn-back" onclick="setVista('clientes')">← Volver</button>
-      <h2 class="page-title2">🗺️ Mapa de recorridos</h2>
+      <h2 class="page-title2">🗺️ ${USAR_DIAS_VISITA ? "Mapa de recorridos" : "Mapa de clientes"}</h2>
     </div>
 
     <div class="form-card">
-      <p class="muted" style="margin:0 0 8px;">Tocá los puntos del mapa para ir armando un grupo — se ponen 🟡 dorados. Elegí el día abajo y aplicalo. Los puntos que ya tienen día asignado se ven con su color.</p>
+      <p class="muted" style="margin:0 0 8px;">${USAR_DIAS_VISITA ? "Tocá los puntos del mapa para ir armando un grupo — se ponen 🟡 dorados. Elegí el día abajo y aplicalo. Los puntos que ya tienen día asignado se ven con su color." : "Acá ves dónde está cada cliente. Tocá un punto para ver su nombre y dirección."}</p>
 
       ${sospechosos.length > 0 ? `
       <div style="background:#fee2e2; border-radius:10px; padding:10px; margin-bottom:10px;">
@@ -3061,20 +3070,22 @@ function renderVistaMapaRutas() {
         <p id="progresoGeocoding" class="muted" style="margin-top:6px;"></p>
       </div>` : ""}
 
+      ${USAR_DIAS_VISITA ? `
       <div style="display:flex; gap:10px; flex-wrap:wrap; font-size:12px; margin-bottom:8px;">
         ${DIAS_VISITA.map(d => `<span style="display:flex; align-items:center; gap:4px;"><span style="width:10px; height:10px; border-radius:50%; background:${DIAS_COLOR[d]}; display:inline-block;"></span>${d}</span>`).join("")}
         <span style="display:flex; align-items:center; gap:4px;"><span style="width:10px; height:10px; border-radius:50%; background:${DIAS_COLOR[""]}; display:inline-block;"></span>Sin día</span>
         <span style="display:flex; align-items:center; gap:4px;"><span style="width:10px; height:10px; border-radius:50%; background:#fbbf24; display:inline-block;"></span>Seleccionado</span>
-      </div>
+      </div>` : ""}
 
       <div id="mapaRutasContenedor" style="width:100%; height:360px; border-radius:12px; overflow:hidden; background:#f1f5f9; display:flex; align-items:center; justify-content:center;">
         ${routeClients.length === 0 ? `<span class="muted">Todavía no tenés clientes con ubicación cargada.</span>` : `<span class="muted">Cargando mapa...</span>`}
       </div>
     </div>
 
+    ${USAR_DIAS_VISITA ? `
     <div class="form-card" id="panelSeleccionMapa">
       ${renderPanelSeleccionMapaHTML()}
-    </div>
+    </div>` : ""}
   `;
 
   if (routeClients.length > 0) {
@@ -3117,13 +3128,14 @@ function renderVistaFormCliente() {
           ${[...new Set(clients.map(x => x.zona).filter(Boolean))].sort().map(z => `<option value="${z}"></option>`).join("")}
         </datalist>
       </div>
+      ${USAR_DIAS_VISITA ? `
       <div class="form-group">
         <label>Día de visita</label>
         <select id="formClienteDia">
           <option value="" ${!c || !c.diaVisita ? "selected" : ""}>Sin asignar</option>
           ${DIAS_VISITA.map(d => `<option value="${d}" ${c && c.diaVisita === d ? "selected" : ""}>${d}</option>`).join("")}
         </select>
-      </div>
+      </div>` : ""}
       <div class="form-group">
         <label>Horario de visita</label>
         <select id="formClienteHorario">
