@@ -834,7 +834,7 @@ function verDatosCliente() {
 
   document.getElementById("verClienteNombre").textContent = c.nombre;
 
-  const frecuenciaTxto = sinFrecuencia(c) ? "Sin frecuencia" : (Number(c.frecuencia) === 14 ? "Quincenal (cada 14 días)" : (Number(c.frecuencia) === 21 ? "Cada 21 días" : "Semanal (cada 7 días)"));
+  const frecuenciaTxto = sinFrecuencia(c) ? "Sin frecuencia" : (Number(c.frecuencia) === 14 ? "Quincenal (cada 14 días)" : (Number(c.frecuencia) === 21 ? "Cada 21 días" : (Number(c.frecuencia) === 28 ? "Cada 28 días" : "Semanal (cada 7 días)")));
   const filas = [
     ["Tipo", c.tipo || "Otro"],
     ["Zona", c.zona || "—"],
@@ -871,7 +871,7 @@ function abrirModalCliente(id) {
 
   document.getElementById("modalClienteNombre").textContent = client.nombre;
   document.getElementById("modalClienteInfo").textContent =
-    [client.tipo || "Otro", client.zona ? "📍 " + client.zona : "", client.horario ? "🕐 " + client.horario : "", sinFrecuencia(client) ? "📅 Sin frecuencia" : (Number(client.frecuencia) === 14 ? "📅 Quincenal" : (Number(client.frecuencia) === 21 ? "📅 Cada 21 días" : "📅 Semanal")), client.telefono, client.telefono2, client.direccion].filter(Boolean).join(" · ");
+    [client.tipo || "Otro", client.zona ? "📍 " + client.zona : "", client.horario ? "🕐 " + client.horario : "", sinFrecuencia(client) ? "📅 Sin frecuencia" : (Number(client.frecuencia) === 14 ? "📅 Quincenal" : (Number(client.frecuencia) === 21 ? "📅 Cada 21 días" : (Number(client.frecuencia) === 28 ? "📅 Cada 28 días" : "📅 Semanal"))), client.telefono, client.telefono2, client.direccion].filter(Boolean).join(" · ");
 
   const btnTel2 = document.getElementById("btnModalTelefono2");
   if (btnTel2) btnTel2.style.display = client.telefono2 ? "flex" : "none";
@@ -1405,8 +1405,8 @@ function getDisponibleParaAgregar(productId) {
   // (todavía no descontaron stock de verdad, pero ya no está disponible
   // para ofrecerle a otro cliente el mismo día).
   const reservadoEnBorradores = orders
-    .filter(o => o.borrador && !o.eliminado && o.id !== editingOrderId)
-    .reduce((acc, o) => acc + o.items.filter(i => i.productId === productId).reduce((a, i) => a + i.cantidad, 0), 0);
+    .filter(o => !o.eliminado && o.id !== editingOrderId)
+    .reduce((acc, o) => acc + o.items.filter(i => i.productId === productId && (o.borrador || i.pendiente)).reduce((a, i) => a + i.cantidad, 0), 0);
   return prod.stock - usadoEnPedidoActual - reservadoEnBorradores;
 }
 
@@ -1489,8 +1489,35 @@ function eliminarItem(id) {
   renderPedido();
 }
 
+function toggleFaltaItem(id) {
+  const item = currentItems.find(i => i.id === id);
+  if (!item) return;
+  if (item.pendiente) delete item.pendiente; else item.pendiente = true;
+  renderPedido();
+}
+
+// Entrega lo que faltaba de un pedido (un producto o todos los que faltan).
+// Si el pedido ya estaba entregado, recién ahora se descuenta del stock.
+function entregarFaltante(orderId, itemId) {
+  const order = orders.find(o => o.id === orderId);
+  if (!order) return;
+  const items = order.items.filter(i => i.pendiente && (!itemId || i.id === itemId));
+  if (!items.length) return;
+  if (!confirm(`¿Entregaste ${items.map(i => i.cantidad + "× " + i.nombre).join(", ")} a ${order.client.nombre}?`)) return;
+  items.forEach(i => delete i.pendiente);
+  if (!order.borrador) aplicarStock(items, -1);
+  order.actualizadoEn = Date.now();
+  guardarStorage();
+  if (vistaActual === "historial") renderVistaHistorial();
+  else if (vistaActual === "resumen") renderVistaResumen();
+  else renderApp();
+}
+
+// Mueve el stock de los productos de un pedido. Los marcados "⏳ Falta"
+// (item.pendiente) no se tocan: se descuentan recién cuando se entregan.
 function aplicarStock(items, signo) {
   items.forEach(item => {
+    if (item.pendiente) return;
     const prod = catalog.find(p => p.id === item.productId);
     if (prod) {
       prod.stock += signo * item.cantidad;
@@ -1513,7 +1540,11 @@ function renderPedido() {
           : `<small>s/${formatCurrency(item.subtotalSinIVA)}<br>c/${formatCurrency(item.subtotalConIVA)}</small>`;
         return `
           <tr>
-            <td>${item.nombre}</td>
+            <td>${item.nombre}
+              <label style="display:flex; align-items:center; gap:4px; font-size:12px; margin-top:3px; color:${item.pendiente ? "#92400e" : "#6b7280"}; cursor:pointer;">
+                <input type="checkbox" ${item.pendiente ? "checked" : ""} onchange="toggleFaltaItem('${item.id}')" style="width:auto; margin:0;" /> ⏳ Falta entregar
+              </label>
+            </td>
             <td><input type="number" min="1" value="${item.cantidad}" onchange="actualizarCantidadItem('${item.id}', this.value)" style="width:55px;" /></td>
             <td>${precio}</td>
             <td><button class="btn-danger btn-sm" onclick="eliminarItem('${item.id}')">✕</button></td>
@@ -2385,9 +2416,9 @@ function construirMensajeWhatsApp(order, modo) {
     const subtotal   = modo === "con" ? i.subtotalConIVA    : i.subtotalSinIVA;
     const esBlister12 = BLISTER_12.includes(i.nombre) && i.categoria === "Vita";
     if (esBlister12) {
-      msg += `▪️ ${i.nombre}\n   ${i.cantidad} u x ${formatCurrency(precioUnit)} = ${formatCurrency(precioUnit / 12)} c/u\n`;
+      msg += `▪️ ${i.nombre}${i.pendiente ? " ⏳ (te lo llevo después)" : ""}\n   ${i.cantidad} u x ${formatCurrency(precioUnit)} = ${formatCurrency(precioUnit / 12)} c/u\n`;
     } else {
-      msg += `▪️ ${i.nombre}\n   ${i.cantidad} u x ${formatCurrency(precioUnit)} = ${formatCurrency(subtotal)}\n`;
+      msg += `▪️ ${i.nombre}${i.pendiente ? " ⏳ (te lo llevo después)" : ""}\n   ${i.cantidad} u x ${formatCurrency(precioUnit)} = ${formatCurrency(subtotal)}\n`;
     }
   });
   const total = modo === "con" ? order.totals.totalConIVA : order.totals.totalSinIVA;
@@ -2458,9 +2489,9 @@ function construirMensajeVentaCobrada(order, modo) {
     const subtotal   = modo === "con" ? i.subtotalConIVA    : i.subtotalSinIVA;
     const esBlister12 = BLISTER_12.includes(i.nombre) && i.categoria === "Vita";
     if (esBlister12) {
-      msg += `▪️ ${i.nombre}\n   ${i.cantidad} u x ${formatCurrency(precioUnit)} = ${formatCurrency(precioUnit / 12)} c/u\n`;
+      msg += `▪️ ${i.nombre}${i.pendiente ? " ⏳ (te lo llevo después)" : ""}\n   ${i.cantidad} u x ${formatCurrency(precioUnit)} = ${formatCurrency(precioUnit / 12)} c/u\n`;
     } else {
-      msg += `▪️ ${i.nombre}\n   ${i.cantidad} u x ${formatCurrency(precioUnit)} = ${formatCurrency(subtotal)}\n`;
+      msg += `▪️ ${i.nombre}${i.pendiente ? " ⏳ (te lo llevo después)" : ""}\n   ${i.cantidad} u x ${formatCurrency(precioUnit)} = ${formatCurrency(subtotal)}\n`;
     }
   });
   const total = modo === "con" ? order.totals.totalConIVA : order.totals.totalSinIVA;
@@ -2573,7 +2604,7 @@ function imprimirRemito(id) {
     const precio = modo === "con" ? i.precioVentaConIVA : i.precioVentaSinIVA;
     const subtotal = modo === "con" ? i.subtotalConIVA : i.subtotalSinIVA;
     const esBlister12 = BLISTER_12.includes(i.nombre) && i.categoria === "Vita";
-    lineas.push(`${i.cantidad} x ${i.nombre}`);
+    lineas.push(`${i.cantidad} x ${i.nombre}${i.pendiente ? " (PENDIENTE)" : ""}`);
     if (esBlister12) {
       lineas.push(`   ${formatCurrency(precio)} la caja = ${formatCurrency(precio / 12)} c/u`);
     } else {
@@ -3057,6 +3088,7 @@ function renderApp() {
     case "ruta": renderVistaRuta(); break;
     case "ordenar-clientes": renderVistaOrdenarClientes(); break;
     case "pedido-fabrica": renderVistaPedidoFabrica(); break;
+    case "revisar-stock": renderVistaRevisarStock(); break;
   }
 }
 
@@ -3897,9 +3929,10 @@ function renderVistaFormCliente() {
       <div class="form-group">
         <label>Frecuencia de visita</label>
         <select id="formClienteFrecuencia">
-          <option value="7" ${!c || (Number(c.frecuencia) !== 14 && Number(c.frecuencia) !== 21 && !sinFrecuencia(c)) ? "selected" : ""}>Semanal (cada 7 días)</option>
+          <option value="7" ${!c || (![14, 21, 28].includes(Number(c.frecuencia)) && !sinFrecuencia(c)) ? "selected" : ""}>Semanal (cada 7 días)</option>
           <option value="14" ${c && Number(c.frecuencia) === 14 ? "selected" : ""}>Quincenal (cada 14 días)</option>
           <option value="21" ${c && Number(c.frecuencia) === 21 ? "selected" : ""}>Cada 21 días</option>
+          <option value="28" ${c && Number(c.frecuencia) === 28 ? "selected" : ""}>Cada 28 días</option>
           <option value="0" ${sinFrecuencia(c) ? "selected" : ""}>Sin frecuencia (no avisar días sin comprar)</option>
         </select>
       </div>
@@ -4136,7 +4169,9 @@ function renderOrderCard(order) {
       </div>` : ''}
 
     <div class="order-items">
-      ${order.items.map(i => `<span class="order-item-tag">${i.cantidad}× ${i.nombre}</span>`).join("")}
+      ${order.items.map(i => i.pendiente
+        ? `<span class="order-item-tag" style="background:#fef3c7; color:#92400e;">⏳ ${i.cantidad}× ${i.nombre} (falta)</span>`
+        : `<span class="order-item-tag">${i.cantidad}× ${i.nombre}</span>`).join("")}
     </div>
     ${order.notas ? `<div class="order-nota">📝 ${order.notas}</div>` : ""}
 
@@ -4157,6 +4192,8 @@ function renderOrderCard(order) {
         </div>
       </div>` : ''}
 
+    ${order.items.some(i => i.pendiente) ? `
+      <button class="btn-sm btn-outline" style="border-color:#f59e0b; color:#92400e; margin:6px 0;" onclick="entregarFaltante('${order.id}')">✅ Entregué lo que faltaba</button>` : ""}
     <div class="order-actions">
       ${order.borrador ? `
         <button class="btn-sm btn-confirmar" onclick="confirmarEntrega('${order.id}')">🚚 Confirmar entrega</button>
@@ -5047,11 +5084,11 @@ function renderCardVentaWeb(mesSel, anioSel, mesNombre) {
 // ═══════════════════════════════════════════════════════════════
 // RUTA DEL DÍA y ORDENAR CLIENTES
 // ═══════════════════════════════════════════════════════════════
-// Cada cliente tiene día de visita, zona y frecuencia (7, 14 o 21 días). El
+// Cada cliente tiene día de visita, zona y frecuencia (7, 14, 21 o 28 días). El
 // calendario es FIJO, no depende de si compró: un quincenal de los martes
 // toca un martes sí y otro no. Para saber cuál, se guarda "cicloInicio": el
 // lunes de una semana en la que le toca (se elige con "¿Cuándo le toca la
-// próxima? Esta semana / La que viene / En 2 semanas").
+// próxima? Esta semana / La que viene / En 2 semanas / En 3 semanas").
 const NOMBRES_DIA = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
 let rutaFecha = null;          // "YYYY-MM-DD" del día que se está mirando
 let rutaZona = "Todas";
@@ -5072,7 +5109,7 @@ function lunesDe(fecha) {
 }
 function frecuenciaSemanas(c) {
   const f = Number(c.frecuencia);
-  return f === 14 ? 2 : f === 21 ? 3 : 1; // sin dato = semanal, como siempre
+  return f === 14 ? 2 : f === 21 ? 3 : f === 28 ? 4 : 1; // sin dato = semanal, como siempre
 }
 function faltaElegirSemana(c) {
   return frecuenciaSemanas(c) > 1 && !c.cicloInicio;
@@ -5099,7 +5136,7 @@ function fechaCorta(d) {
 function textoFrecuencia(c) {
   if (sinFrecuencia(c)) return "Sin frecuencia";
   const n = frecuenciaSemanas(c);
-  return n === 2 ? "Cada 14 días" : n === 3 ? "Cada 21 días" : "Semanal";
+  return n === 2 ? "Cada 14 días" : n === 3 ? "Cada 21 días" : n === 4 ? "Cada 28 días" : "Semanal";
 }
 function clientesDeRuta() {
   return clients.filter(c => !c.eliminado && c.id !== CLIENTE_WEB_ID && (c.tipo || "Otro") !== "Otro");
@@ -5224,7 +5261,7 @@ function renderVistaRuta() {
     <div class="form-card" style="border-left:4px solid #f59e0b;">
       <p style="margin:0 0 8px; font-size:14px;">
         ${sinDia ? `⚠️ ${sinDia} cliente${sinDia === 1 ? "" : "s"} sin día de visita (no aparecen en ninguna ruta).<br>` : ""}
-        ${faltaSemana ? `⚠️ ${faltaSemana} cliente${faltaSemana === 1 ? "" : "s"} de 14 o 21 días sin semana elegida.` : ""}
+        ${faltaSemana ? `⚠️ ${faltaSemana} cliente${faltaSemana === 1 ? "" : "s"} de 14, 21 o 28 días sin semana elegida.` : ""}
       </p>
       <button class="btn-primary btn-full" onclick="setVista('ordenar-clientes')">📋 Ordenar clientes</button>
     </div>` : ""}
@@ -5273,7 +5310,7 @@ function filaOrdenarCliente(c) {
     const hoyLunes = lunesDe(new Date());
     const prox = c.cicloInicio ? proximaSemanaQueToca(c, new Date()) : null;
     const k = prox ? Math.round((prox - hoyLunes) / (7 * 86400000)) : -1;
-    const opciones = ["Esta semana", "La que viene", "En 2 semanas"].slice(0, n);
+    const opciones = ["Esta semana", "La que viene", "En 2 semanas", "En 3 semanas"].slice(0, n);
     semana = `
       <div style="margin-top:6px;">
         <div style="font-size:12px; ${c.cicloInicio ? "color:#6b7280;" : "color:#92400e; font-weight:600;"}">${c.cicloInicio ? "¿Cuándo le toca la próxima?" : "⚠️ ¿Cuándo le toca la próxima?"}</div>
@@ -5294,6 +5331,7 @@ function filaOrdenarCliente(c) {
           <option value="7" ${n === 1 ? "selected" : ""}>Semanal</option>
           <option value="14" ${n === 2 ? "selected" : ""}>Cada 14</option>
           <option value="21" ${n === 3 ? "selected" : ""}>Cada 21</option>
+          <option value="28" ${n === 4 ? "selected" : ""}>Cada 28</option>
           <option value="0" ${n === 0 ? "selected" : ""}>Sin frec.</option>
         </select>
         <input list="listaZonasOrdenar" placeholder="Zona…" value="${esc(c.zona)}" onchange="cambiarClienteOrden('${c.id}', 'zona', this.value)" style="${c.zona ? "" : "border:2px solid #f59e0b;"}" />
@@ -5325,7 +5363,7 @@ function renderVistaOrdenarClientes() {
       <h2 class="page-title2">📋 Ordenar clientes</h2>
     </div>
     <div class="form-card">
-      <p class="muted" style="margin:0 0 8px; font-size:13px;">Elegí día, frecuencia y zona de cada cliente. Se guarda solo al cambiarlo. A los de 14 o 21 días, tocá cuándo les toca la próxima.</p>
+      <p class="muted" style="margin:0 0 8px; font-size:13px;">Elegí día, frecuencia y zona de cada cliente. Se guarda solo al cambiarlo. A los de 14, 21 o 28 días, tocá cuándo les toca la próxima.</p>
       <div class="tipo-tabs" style="margin-bottom:8px;">
         <button class="tipo-tab ${ordenarSoloFaltantes ? "active" : ""}" onclick="${ordenarSoloFaltantes ? "" : "toggleSoloFaltantes()"}">⚠️ Les falta algo (${faltan})</button>
         <button class="tipo-tab ${ordenarSoloFaltantes ? "" : "active"}" onclick="${ordenarSoloFaltantes ? "toggleSoloFaltantes()" : ""}">Ver todos</button>
@@ -5516,11 +5554,12 @@ function ventasParaPedidoFabrica() {
       o.items.forEach(i => { fila(productoVendido(i).clave).reservado += i.cantidad; });
       return;
     }
+    o.items.filter(i => i.pendiente).forEach(i => { fila(productoVendido(i).clave).reservado += i.cantidad; });
     const f = fechaPedidoComoDate(o);
     const m = f.getMonth() + 1, a = f.getFullYear();
     const campo = m === mesAct && a === anioAct ? "esteMes" : (m === mesAnt && a === anioAnt ? "mesPasado" : null);
     if (!campo) return;
-    o.items.forEach(i => { fila(productoVendido(i).clave)[campo] += i.cantidad; });
+    o.items.filter(i => !i.pendiente).forEach(i => { fila(productoVendido(i).clave)[campo] += i.cantidad; });
   });
   return { r, nombreAct: MESES_ES[mesAct - 1], nombreAnt: MESES_ES[mesAnt - 1] };
 }
@@ -5575,6 +5614,105 @@ function renderVistaPedidoFabrica() {
     </div>
   `;
   actualizarTotalesFabrica();
+}
+
+// ── Revisar movimientos de stock de un producto (solo muestra, no cambia) ──
+// Reconstruye, con los pedidos guardados, qué pasó con el stock de un
+// producto desde el último ajuste a mano: qué ventas descontaron, cuáles no
+// (y por qué), cuánto debería quedar, y a qué producto está atado cada
+// nombre de la página web.
+let revisarStockId = null;
+
+function abrirRevisarStock(id) {
+  revisarStockId = id;
+  setVista("revisar-stock");
+}
+
+function renderVistaRevisarStock() {
+  const cont = document.getElementById("vista-contenido");
+  if (!cont) return;
+  const prod = catalog.find(p => p.id === revisarStockId);
+  if (!prod) { setVista("stock"); return; }
+  const esc = t => String(t || "").replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  const n = normalizarNombreProducto(prod.nombre);
+  const desde = prod.stockCargadoEn ? new Date(prod.stockCargadoEn) : null;
+  const desdeDia = desde ? new Date(desde.getFullYear(), desde.getMonth(), desde.getDate()) : null;
+
+  // Pedidos que tienen este producto (por código interno o por nombre).
+  const movs = [];
+  orders.forEach(o => {
+    (o.items || []).forEach(i => {
+      const delProducto = i.productId === prod.id || normalizarNombreProducto(i.nombre) === n;
+      if (!delProducto) return;
+      const f = fechaPedidoComoDate(o);
+      if (desdeDia && f < desdeDia) return;
+      const otro = i.productId && i.productId !== prod.id ? catalog.find(p => p.id === i.productId) : null;
+      let estado, desconto = false, cuenta = false;
+      if (o.eliminado) estado = "🗑️ pedido borrado";
+      else if (o.borrador) { estado = "📋 pendiente de entrega (todavía no descuenta)"; }
+      else if (i.pendiente) { estado = "⏳ falta entregar (todavía no descuenta)"; }
+      else if (i.productId === prod.id) { estado = "✅ descontó stock"; desconto = true; cuenta = true; }
+      else if (otro) { estado = `⚠️ NO descontó: está atado a "${otro.nombre}"${otro.eliminado ? " (eliminado)" : ""}`; cuenta = true; }
+      else { estado = "⚠️ NO descontó: atado a un producto que ya no existe"; cuenta = true; }
+      movs.push({ o, i, f, estado, desconto, cuenta });
+    });
+  });
+  movs.sort((a, b) => b.f - a.f);
+  const vendidas = movs.filter(m => m.cuenta).reduce((a, m) => a + m.i.cantidad, 0);
+  const noDescontadas = movs.filter(m => m.cuenta && !m.desconto).reduce((a, m) => a + m.i.cantidad, 0);
+  const fijado = /^fijado en (\d+)/.exec(prod.stockCargadoDetalle || "");
+  const sumado = /^\+(\d+)/.exec(prod.stockCargadoDetalle || "");
+
+  // Nombres de la web atados a este producto, y nombres web parecidos atados a otro.
+  const palabra = n.split(" ").filter(w => w.length > 3).sort((a, b) => b.length - a.length)[0] || n;
+  const aliasPropios = prod.aliasWeb || [];
+  const aliasAjenos = [];
+  catalog.forEach(p => {
+    if (p.id === prod.id) return;
+    (p.aliasWeb || []).forEach(a => { if (a.includes(palabra)) aliasAjenos.push({ alias: a, prod: p }); });
+  });
+  const mismos = catalog.filter(p => p.id !== prod.id && normalizarNombreProducto(p.nombre) === n);
+
+  cont.innerHTML = `
+    <div class="page-header">
+      <button class="btn-back" onclick="abrirStock()">← Volver</button>
+      <h2 class="page-title2">🔍 ${esc(prod.nombre)}</h2>
+    </div>
+    <div class="form-card">
+      <div class="stock-row"><strong>Stock en la app</strong><strong>${prod.stock}</strong></div>
+      <div class="stock-row"><span>Último ajuste a mano</span><span>${desde ? `${String(desde.getDate()).padStart(2, "0")}/${String(desde.getMonth() + 1).padStart(2, "0")}/${desde.getFullYear()} ${desde.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", hour12: false })} (${esc(prod.stockCargadoDetalle || "")})` : "No hay registro"}</span></div>
+      <div class="stock-row"><span>Vendidas y entregadas desde ${desde ? "ese ajuste" : "siempre"}</span><strong>${vendidas}</strong></div>
+      ${noDescontadas ? `<div class="stock-row" style="color:#dc2626;"><strong>⚠️ De esas, NO descontaron stock</strong><strong>${noDescontadas}</strong></div>` : ""}
+      ${fijado ? `<p style="margin:8px 0 0; font-size:14px;">Fijaste el stock en <strong>${fijado[1]}</strong> y desde entonces se entregaron <strong>${vendidas}</strong>: deberían quedar <strong>${Math.max(0, fijado[1] - vendidas)}</strong>${Number(fijado[1]) - vendidas !== prod.stock ? ` — <span style="color:#dc2626;">la app dice ${prod.stock}</span>` : " ✅ (coincide con la app)"}.</p>`
+        : sumado ? `<p class="muted" style="margin:8px 0 0; font-size:13px;">El último ajuste fue sumar ${sumado[1]}; para saber cuánto debería haber, conviene fijar el stock contando las cajas y revisar de nuevo más adelante.</p>`
+        : `<p class="muted" style="margin:8px 0 0; font-size:13px;">No hay un ajuste a mano registrado. Contá las cajas, usá "= Fijar stock" y desde ahí esta pantalla te muestra todo.</p>`}
+    </div>
+
+    <div class="form-card">
+      <h3 class="section-title">🌐 Nombres de la página web</h3>
+      ${aliasPropios.length ? aliasPropios.map(a => `<div class="stock-row"><span>"${esc(a)}"</span><span style="color:#059669;">✅ atado a este producto</span></div>`).join("") : `<p class="muted" style="margin:0;">Ningún nombre de la web está atado a este producto.</p>`}
+      ${aliasAjenos.map(x => `<div class="stock-row" style="color:#dc2626;"><span>"${esc(x.alias)}"</span><span>⚠️ atado a "${esc(x.prod.nombre)}"${x.prod.eliminado ? " (eliminado)" : ""}</span></div>`).join("")}
+      ${aliasAjenos.length ? `<p style="margin:8px 0 0; font-size:13px; color:#dc2626;">Las ventas web con ese nombre le descuentan a otro producto, no a ${esc(prod.nombre)}.</p>` : ""}
+    </div>
+
+    ${mismos.length ? `
+    <div class="form-card" style="border-left:4px solid #dc2626;">
+      <h3 class="section-title">⚠️ Hay otro producto con el mismo nombre</h3>
+      ${mismos.map(p => `<div class="stock-row"><span>${esc(p.nombre)} · ${esc(p.categoria)}${p.eliminado ? " (eliminado)" : ""}</span><span>stock ${p.stock}</span></div>`).join("")}
+    </div>` : ""}
+
+    <div class="form-card">
+      <h3 class="section-title">📜 Movimientos ${desde ? "desde el último ajuste" : ""} (${movs.length})</h3>
+      ${movs.length ? movs.map(m => `
+        <div class="stock-row" style="align-items:flex-start;">
+          <div>
+            <div class="stock-nombre">${esc(m.o.client.nombre)}${esPedidoWeb(m.o) ? " 🌐" : ""}</div>
+            <div class="muted" style="font-size:12px;">${String(m.o.fecha).replace(/,.*/, "")} · ${m.estado}</div>
+          </div>
+          <strong>${m.i.cantidad}</strong>
+        </div>`).join("") : `<p class="muted" style="margin:0;">No hay pedidos con este producto ${desde ? "desde el último ajuste" : ""}.</p>`}
+    </div>
+  `;
 }
 
 // ── Vista: RESUMEN ────────────────────────────────────────────────────────────
@@ -5869,6 +6007,24 @@ function renderVistaResumen() {
         </div>
       `).join("")}
     </div>` : ""}
+
+    ${(() => {
+      const conFaltantes = orders.filter(o => !o.eliminado && !o.borrador && o.items.some(i => i.pendiente));
+      if (!conFaltantes.length) return "";
+      return `
+      <div class="form-card" style="border-left:4px solid #f59e0b;">
+        <h3 class="section-title">⏳ Falta entregar (${conFaltantes.length})</h3>
+        <p class="muted" style="margin:0 0 8px; font-size:13px;">Pedidos entregados a los que les faltó algo. Cuando lo lleves, tocá ✅ Entregado y se descuenta del stock.</p>
+        ${conFaltantes.map(o => o.items.filter(i => i.pendiente).map(i => `
+          <div class="stock-row">
+            <div style="cursor:pointer;" onclick="clienteActivoId='${o.client.id}'; setVista('historial', '${o.client.id}')">
+              <div class="stock-nombre">${o.client.nombre}</div>
+              <div class="muted">${i.cantidad}× ${i.nombre} · pedido del ${String(o.fecha).replace(/,.*/, "")}</div>
+            </div>
+            <button class="btn-sm btn-success" style="color:#fff;" onclick="entregarFaltante('${o.id}', '${i.id}')">✅ Entregado</button>
+          </div>`).join("")).join("")}
+      </div>`;
+    })()}
 
     ${renderCardMonotributo(mesResumenSel, anioResumenSel, mesResumenCapital)}
 
@@ -6597,6 +6753,7 @@ function renderVistaStock() {
                 <button class="btn-success" onclick="guardarPrecio('${p.id}')">Guardar</button>
                 <button class="btn-outline" style="color:#dc2626;" onclick="eliminarProducto('${p.id}')">🗑️ Eliminar</button>
               </div>
+              <button class="btn-outline btn-full" style="margin-top:8px;" onclick="abrirRevisarStock('${p.id}')">🔍 Revisar movimientos de stock</button>
               <details style="margin-top:10px;">
                 <summary style="cursor:pointer; font-size:13px; color:#2563eb;">🔀 ¿Está repetido? Unificar con otro producto</summary>
                 <p class="muted" style="font-size:12px; margin:6px 0;">Elegí el repetido: su stock se suma a "${p.nombre}", sus ventas pasan a este y el repetido se elimina.</p>
@@ -7446,14 +7603,26 @@ async function activarConCodigo(codigo) {
   else mostrarPantallaActivacion("Ese código no está activo. Revisalo o escribile a quien te dio la app.");
 }
 
-// Arranque: primero chequea la licencia; si está OK, arranca la app normal.
+// Arranque. Si la licencia ya estaba activa y se chequeó bien hace poco, la
+// app abre al instante con los datos del celu y la licencia se revisa por
+// detrás: si en el panel la desactivaste, la app se recarga y pide el código.
+// Si nunca se activó (o hace mucho que no se chequea), primero se chequea.
 async function arranque() {
+  const diasDesdeOk = (Date.now() - (licencia.ultimoOk || 0)) / 86400000;
+  if (!licenciaExigida() || (licencia.activa && diasDesdeOk <= DIAS_GRACIA_SIN_INTERNET)) {
+    iniciarApp();
+    if (licenciaExigida()) verificarLicencia().then(ok => { if (!ok) location.reload(); });
+    return;
+  }
   const ok = await verificarLicencia();
   if (ok) iniciarApp();
   else mostrarPantallaActivacion();
 }
 
 function iniciarApp() {
+  // La pantalla se dibuja YA con los datos guardados en el celu; después
+  // cargarDatos trae lo nuevo de Google y la vuelve a dibujar.
+  renderApp();
   cargarDatos();
 }
 
