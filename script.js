@@ -3127,6 +3127,8 @@ function renderVistaConfig() {
         </div>
       </div>
 
+      <button class="btn-gray btn-full" style="margin-top:6px;" onclick="mostrarNovedades(true)">📣 Novedades de la app</button>
+
       <hr style="margin:18px 0; border:none; border-top:1px solid #eee;" />
       <label>🔌 Conexión con Google (avanzado)</label>
       <p class="muted" style="font-size:12px; margin:2px 0 6px;">Pegá acá la dirección del Apps Script de tu Google (te la damos en el instructivo de instalación). Si lo dejás vacío, la app funciona igual pero guarda todo solo en este celular, sin respaldo ni sincronización.</p>
@@ -7542,6 +7544,77 @@ function initBloqueo() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// NOVEDADES
+// ═══════════════════════════════════════════════════════════════
+// Cartel que aparece UNA vez, al abrir la app después de una actualización,
+// contando lo nuevo. Para una actualización nueva: agregá un bloque ARRIBA de
+// todo, con un "id" que sea la fecha (AAAA-MM-DD; si hay dos el mismo día,
+// AAAA-MM-DD-2). Cada celular se acuerda de la última que vio.
+const NOVEDADES = [
+  {
+    id: "2026-11-17",
+    titulo: "Novedades de noviembre",
+    items: [
+      "⏳ <strong>Falta entregar:</strong> al armar un pedido podés tildar un producto que no llevaste. No descuenta stock hasta que lo entregás, y en 📊 Resumen ves todo lo que falta llevar, con el botón ✅ Entregado.",
+      "🔍 <strong>Revisar movimientos de stock:</strong> en Stock, abrí un producto y tocá este botón para ver qué ventas le descontaron stock desde la última vez que lo cargaste a mano.",
+      "📅 <strong>Nueva frecuencia de visita:</strong> ahora podés poner clientes que visitás cada 28 días.",
+      "⚡ <strong>La app abre más rápido:</strong> se ve al instante con lo guardado en el celular y después se actualiza sola."
+    ]
+  }
+];
+const NOVEDADES_KEY = "demo_novedades_vistas_v1";
+
+function marcarNovedadesVistas() {
+  try { if (NOVEDADES.length) localStorage.setItem(NOVEDADES_KEY, NOVEDADES[0].id); } catch {}
+}
+
+// Al abrir la app: si hay novedades que este celular no vio, las muestra.
+// A alguien que recién instala la app (sin datos cargados) no le mostramos
+// cambios viejos: para él todo es nuevo.
+function revisarNovedades() {
+  if (!NOVEDADES.length) return;
+  if (document.getElementById("pantallaActivacionLicencia") || !document.getElementById("vista-contenido")) return;
+  if (typeof appBloqueada !== "undefined" && appBloqueada) { setTimeout(revisarNovedades, 1500); return; }
+  let vista = null;
+  try { vista = localStorage.getItem(NOVEDADES_KEY); } catch { return; }
+  if (vista === null && clients.length === 0 && orders.length === 0 && catalog.length === 0) {
+    marcarNovedadesVistas();
+    return;
+  }
+  const nuevas = NOVEDADES.filter(n => vista === null ? n === NOVEDADES[0] : n.id > vista);
+  if (nuevas.length) mostrarNovedades(false, nuevas);
+}
+
+function mostrarNovedades(todas, lista) {
+  const bloques = todas ? NOVEDADES : (lista || NOVEDADES.slice(0, 1));
+  if (!bloques.length) return alert("Todavía no hay novedades.");
+  cerrarNovedades();
+  const cont = document.createElement("div");
+  cont.id = "cartelNovedades";
+  cont.style.cssText = "position:fixed; inset:0; z-index:9000; background:rgba(15,23,42,0.55); display:flex; align-items:center; justify-content:center; padding:16px; box-sizing:border-box;";
+  cont.innerHTML = `
+    <div style="background:#fff; border-radius:16px; width:100%; max-width:420px; max-height:85vh; overflow-y:auto; padding:22px 20px; box-shadow:0 10px 30px rgba(0,0,0,0.2);">
+      <div style="font-size:40px; text-align:center;">📣</div>
+      <h2 style="margin:4px 0 14px; font-size:20px; text-align:center;">${todas ? "Novedades de la app" : "¡Hay novedades en la app!"}</h2>
+      ${bloques.map(b => `
+        <div style="margin-bottom:14px;">
+          ${bloques.length > 1 || todas ? `<div style="font-weight:600; font-size:14px; color:#2563eb; margin-bottom:6px;">${b.titulo}</div>` : ""}
+          <ul style="margin:0; padding-left:18px; font-size:14px; line-height:1.45;">
+            ${b.items.map(i => `<li style="margin-bottom:8px;">${i}</li>`).join("")}
+          </ul>
+        </div>`).join("")}
+      <button class="btn-primary btn-full" onclick="cerrarNovedades(true)">¡Entendido!</button>
+    </div>`;
+  document.body.appendChild(cont);
+}
+
+function cerrarNovedades(marcar) {
+  const c = document.getElementById("cartelNovedades");
+  if (c) c.remove();
+  if (marcar) marcarNovedadesVistas();
+}
+
+// ═══════════════════════════════════════════════════════════════
 // LICENCIA / ACTIVACIÓN
 // ═══════════════════════════════════════════════════════════════
 // URL de TU panel de licencias (central, el mismo para todos los clientes).
@@ -7581,7 +7654,7 @@ async function verificarLicencia() {
 
 function mostrarPantallaActivacion(msg) {
   document.getElementById("app").innerHTML = `
-    <div style="max-width:420px; margin:60px auto; padding:24px; text-align:center;">
+    <div id="pantallaActivacionLicencia" style="max-width:420px; margin:60px auto; padding:24px; text-align:center;">
       <div style="font-size:48px; margin-bottom:8px;">🔒</div>
       <h1 style="font-size:22px; margin:0 0 6px;">Activar la app</h1>
       <p class="muted" style="margin:0 0 18px;">Ingresá el código de activación que te dieron para empezar a usar el sistema.</p>
@@ -7624,6 +7697,7 @@ function iniciarApp() {
   // cargarDatos trae lo nuevo de Google y la vuelve a dibujar.
   renderApp();
   cargarDatos();
+  setTimeout(revisarNovedades, 1500);
 }
 
 // ═══════════════════════════════════════════════════════════════
