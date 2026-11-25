@@ -100,6 +100,11 @@ const DIAS_VISITA = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"];
 // ficha, formulario, carga masiva y mapa). Los datos ya cargados no se borran:
 // si lo volvés a poner en true, reaparecen tal cual estaban.
 const USAR_DIAS_VISITA = true;
+// Pedidos que llegan solos desde una página web propia (pestaña "pedidos_web"
+// de la planilla). Solo sirve si el negocio tiene una web que escribe en esa
+// pestaña. En false la app no la lee ni muestra ese cuadro en Resumen; "🌐
+// Pegar pedido web" sigue funcionando igual.
+const USAR_PEDIDOS_WEB = false;
 // Fila de pestañas "Todos / Lunes ... Viernes / Sin asignar" arriba de la lista
 // de Clientes. En false se oculta SOLO esa fila; el día de visita sigue en la
 // ficha, el formulario, inactivos y el mapa.
@@ -573,7 +578,10 @@ async function forzarRecargaDrive() {
     if (dP.length > 0) orders = fusionarPorId(orders, dP.map(r => JSON.parse(r[0])));
     if (dI.length > 0) inversiones = fusionarPorId(inversiones, dI.map(r => JSON.parse(r[0])));
 
+    const nuevosWeb = aplicarPedidosWeb(await traerPedidosWeb());
+
     guardarLocal();
+    avisarPedidosWebNuevos(nuevosWeb);
     // Si la fusión agregó algo que Drive no tenía, hay que empujarlo de
     // vuelta — pero recién después de soltar el seguro syncEnCurso.
     necesitaPush = clients.length > antesC || catalog.length > antesCat || orders.length > antesP || inversiones.length > antesI;
@@ -618,6 +626,8 @@ async function sincronizarSilencioso() {
     if (dP.length > 0) orders = fusionarPorId(orders, dP.map(r => JSON.parse(r[0])));
     if (dI.length > 0) inversiones = fusionarPorId(inversiones, dI.map(r => JSON.parse(r[0])));
 
+    const nuevosWeb = aplicarPedidosWeb(await traerPedidosWeb());
+
     necesitaPush = clients.length > antesC || catalog.length > antesCat || orders.length > antesP || inversiones.length > antesI;
 
     // Solo se vuelve a dibujar la pantalla si llegó algo nuevo (así no te
@@ -625,6 +635,7 @@ async function sincronizarSilencioso() {
     if (JSON.stringify([clients, catalog, orders, inversiones]) !== fotoAntes) {
       guardarLocal();
       renderApp();
+      avisarPedidosWebNuevos(nuevosWeb);
     }
   } catch (e) {
     console.log("Sync silenciosa falló:", e);
@@ -679,7 +690,7 @@ async function guardarAhora() {
 async function cargarDatos() {
   syncEnCurso = true;
   sincronizarConfigVehiculo();
-  let dC = [], dCat = [], dP = [], dI = [];
+  let dC = [], dCat = [], dP = [], dI = [], filasWeb = [];
   try {
     const [rC, rCat, rP, rI] = await Promise.all([
       fetchConTimeout(API_URL + "?tipo=clientes"),
@@ -694,6 +705,7 @@ async function cargarDatos() {
     if (dP.length > 0)   orders  = orders.concat(dP.map(r => JSON.parse(r[0])));
     if (dI.length > 0)   inversiones = inversiones.concat(dI.map(r => JSON.parse(r[0])));
 
+    filasWeb = await traerPedidosWeb();
   } catch (e) {
     console.log("Modo local:", e);
   }
@@ -731,7 +743,11 @@ async function cargarDatos() {
   // Deduplicar inversiones por ID, quedándose con la versión más reciente de verdad
   inversiones = fusionarPorId(inversiones, []);
 
+  // Pedidos nuevos de la web (recién ahora, con los pedidos ya fusionados).
+  const nuevosWeb = aplicarPedidosWeb(filasWeb);
+
   guardarLocal();
+  avisarPedidosWebNuevos(nuevosWeb);
   // Si el usuario ya está completando un formulario (cargando un cliente o
   // armando un pedido) justo cuando termina de sincronizar, no le pisamos
   // la pantalla — los datos ya quedaron guardados igual, se van a ver la
@@ -875,20 +891,14 @@ function abrirModalCliente(id) {
 
   const btnTel2 = document.getElementById("btnModalTelefono2");
   if (btnTel2) btnTel2.style.display = client.telefono2 ? "flex" : "none";
+  const btnMandar = document.getElementById("btnModalMandarMensaje");
+  if (btnMandar) btnMandar.style.display = client.porMensaje && client.telefono ? "flex" : "none";
+  const btnMsg = document.getElementById("btnModalRecordarMensaje");
+  if (btnMsg) btnMsg.innerHTML = client.recordarMensaje
+    ? `<span class="modal-icon">✅</span><span>Ya le escribí</span>`
+    : `<span class="modal-icon">📱</span><span>Recordar mensaje</span>`;
 
   document.getElementById("modalCliente").style.display = "flex";
-}
-
-// ── Ver imagen del producto ────────────────────────────────────────────────
-function mostrarImagenProducto(nombre) {
-  const src = IMAGENES_PRODUCTO[nombre];
-  if (!src) return;
-  document.getElementById("imgProductoModal").src = src;
-  document.getElementById("modalImagenProducto").style.display = "flex";
-}
-
-function cerrarModalImagen() {
-  document.getElementById("modalImagenProducto").style.display = "none";
 }
 
 function cerrarModal() {
@@ -974,6 +984,7 @@ function setFiltroDia(dia) {
 
 function clientesFiltrados() {
   let lista = clients.filter(c => !c.eliminado);
+  if (filtroMensajes) lista = lista.filter(c => c.porMensaje || c.recordarMensaje);
 
   if (tiposSeleccionados.size > 0) {
     lista = lista.filter(c => tiposSeleccionados.has(c.tipo || "Otro"));
@@ -1090,6 +1101,8 @@ function guardarCliente() {
   const email      = document.getElementById("formClienteEmail").value.trim();
   const direccion  = document.getElementById("formClienteDireccion").value.trim();
   const potencial  = document.getElementById("formClientePotencial").checked;
+  const porMensaje = !!document.getElementById("formClientePorMensaje")?.checked;
+  const mensajePropio = (document.getElementById("formClienteMensajePropio")?.value || "").trim();
   const seguimiento = document.getElementById("formClienteSeguimiento")?.value || "";
   const latVal = document.getElementById("formClienteLat")?.value;
   const lngVal = document.getElementById("formClienteLng")?.value;
@@ -1124,9 +1137,9 @@ function guardarCliente() {
 
   if (editandoClienteId) {
     const c = clients.find(c => c.id === editandoClienteId);
-    if (c) Object.assign(c, { nombre, tipo, diaVisita, zona, horario, frecuencia, telefono, telefono2, email, direccion, potencial, seguimiento, lat, lng, ubicacionManual, actualizadoEn: Date.now() });
+    if (c) Object.assign(c, { nombre, tipo, diaVisita, zona, horario, frecuencia, telefono, telefono2, email, direccion, potencial, porMensaje, mensajePropio, seguimiento, lat, lng, ubicacionManual, actualizadoEn: Date.now() });
   } else {
-    clients.unshift({ id: generarId(), nombre, tipo, diaVisita, zona, horario, frecuencia, telefono, telefono2, email, direccion, notas: "", potencial, seguimiento, lat, lng, ubicacionManual, actualizadoEn: Date.now() });
+    clients.unshift({ id: generarId(), nombre, tipo, diaVisita, zona, horario, frecuencia, telefono, telefono2, email, direccion, notas: "", potencial, porMensaje, mensajePropio, seguimiento, lat, lng, ubicacionManual, actualizadoEn: Date.now() });
   }
 
   guardarStorage();
@@ -1219,7 +1232,6 @@ function autocompletarProducto() {
     ${!esPublico && prod.precioPublico > 0 ? `<span class="price-hint muted">Público: ${formatCurrency(prod.precioPublico)}</span>` : ""}
     ${esPublico ? `<span class="price-hint muted">Mayorista: ${formatCurrency(prod.precioVentaSinIVA)}</span>` : ""}
     <span class="price-hint stock-hint ${claseHint}">Disponible: ${disponible}${disponible > 0 && disponible <= STOCK_BAJO_UMBRAL ? ' ⚠️' : ''}</span>
-    ${IMAGENES_PRODUCTO[prod.nombre] ? `<button type="button" class="price-hint" style="border:none; cursor:pointer;" onclick="mostrarImagenProducto('${prod.nombre}')">📷 Ver imagen</button>` : ''}
   `;
 }
 
@@ -1541,6 +1553,7 @@ function renderPedido() {
         return `
           <tr>
             <td>${item.nombre}
+              ${item.sinProducto && !catalog.some(p => p.id === item.productId && !p.eliminado) ? `<div style="font-size:12px; color:#dc2626;">⚠️ No está en tu lista: sacalo y agregalo desde tu lista</div>` : ""}
               <label style="display:flex; align-items:center; gap:4px; font-size:12px; margin-top:3px; color:${item.pendiente ? "#92400e" : "#6b7280"}; cursor:pointer;">
                 <input type="checkbox" ${item.pendiente ? "checked" : ""} onchange="toggleFaltaItem('${item.id}')" style="width:auto; margin:0;" /> ⏳ Falta entregar
               </label>
@@ -1721,6 +1734,7 @@ function guardarYEntregarPedido() {
 
   const idx = orders.findIndex(o => o.id === editingOrderId);
   if (idx === -1) return;
+  if (avisoProductosWebSinResolver(currentItems)) return;
 
   for (const item of currentItems) {
     const prod = catalog.find(p => p.id === item.productId);
@@ -1784,6 +1798,7 @@ function toggleModoBorrador() {
 function confirmarEntrega(orderId) {
   const order = orders.find(o => o.id === orderId);
   if (!order) return;
+  if (avisoProductosWebSinResolver(order.items)) return;
   // Verificar stock
   for (const item of order.items) {
     const prod = catalog.find(p => p.id === item.productId);
@@ -1801,10 +1816,94 @@ function confirmarEntrega(orderId) {
 
 // ── Sistema de pagos parciales ────────────────────────────────────────────────
 // ── WhatsApp directo desde la lista de clientes ────────────────────────────
+// ── 📱 Mensajes ────────────────────────────────────────────────────────────
+// porMensaje: cliente que se atiende por WhatsApp (no se visita). Fijo.
+// recordarMensaje: recordatorio "tengo que mandarle un mensaje". Se borra
+// solo cuando le escribís por WhatsApp desde la app.
+let filtroMensajes = false;
+function marcarMensajeEnviado(clienteId) {
+  const c = clients.find(x => x.id === clienteId);
+  if (!c || !c.recordarMensaje) return;
+  delete c.recordarMensaje;
+  c.actualizadoEn = Date.now();
+  guardarStorage();
+}
+function toggleRecordarMensaje() {
+  const c = clients.find(x => x.id === clienteActivoId);
+  if (!c) return;
+  if (c.recordarMensaje) delete c.recordarMensaje; else c.recordarMensaje = fechaHoyLocal();
+  c.actualizadoEn = Date.now();
+  guardarStorage();
+  cerrarModal();
+  renderApp();
+}
+// Mensaje igual para todos los clientes de "📱 Mensajes": se escribe una vez
+// (queda guardado y viaja con la config a los otros dispositivos) y se manda
+// de a uno por WhatsApp, con el nombre de cada cliente puesto solo.
+const MENSAJE_CLIENTES_DEFECTO = "Hola {nombre} 👋 ¿Cómo andás? ¿Necesitás algo para esta semana? Avisame y te lo llevo 🙌";
+function textoMensajeClientes() {
+  return configVehiculo.mensajeClientes || MENSAJE_CLIENTES_DEFECTO;
+}
+function guardarMensajeClientes(valor) {
+  configVehiculo.mensajeClientes = String(valor || "").trim() || MENSAJE_CLIENTES_DEFECTO;
+  configVehiculo.actualizadoEn = Date.now();
+  setItemSeguro("demo_config_vehiculo_v1", JSON.stringify(configVehiculo));
+  fetchConTimeout(API_URL, { method: "POST", mode: "no-cors", body: JSON.stringify({ tipo: "vehiculo", payload: [configVehiculo] }) });
+}
+function enviarMensajeCliente(clienteId) {
+  const c = clients.find(x => x.id === clienteId);
+  if (!c || !c.telefono) return;
+  const caja = document.getElementById("textoMensajeClientes");
+  if (caja && caja.value.trim() !== textoMensajeClientes()) guardarMensajeClientes(caja.value);
+  const primerNombre = String(c.nombre).trim();
+  const msg = (c.mensajePropio || textoMensajeClientes()).replace(/\{nombre\}/gi, primerNombre);
+  const tel = c.telefono.replace(/\D/g, "");
+  // WhatsApp se abre en el mismo toque (si no, el celu lo puede bloquear).
+  window.open(`https://wa.me/54${tel}?text=${encodeURIComponent(msg)}`, "_blank");
+  c.ultimoMensajeEnviado = fechaHoyLocal();
+  delete c.recordarMensaje;
+  c.actualizadoEn = Date.now();
+  guardarStorage();
+  const fila = document.getElementById("msg-fila-" + clienteId);
+  if (fila) fila.outerHTML = filaMensajeCliente(c);
+}
+function filaMensajeCliente(c) {
+  const enviadoHoy = c.ultimoMensajeEnviado === fechaHoyLocal();
+  return `
+    <div id="msg-fila-${c.id}" class="stock-row">
+      <div>
+        <div class="stock-nombre">${c.nombre}${c.recordarMensaje ? ' <span style="font-size:12px; color:#065f46;">📱 pendiente</span>' : ""}${c.mensajePropio ? ' <span style="font-size:12px; color:#6b7280;">✏️ mensaje propio</span>' : ""}</div>
+        <div class="muted" style="font-size:12px;">${c.telefono || "sin teléfono"}</div>
+      </div>
+      ${!c.telefono ? `<span class="muted" style="font-size:12px;">Cargá el teléfono</span>`
+        : enviadoHoy ? `<button class="btn-sm btn-outline" style="color:#059669; border-color:#059669;" onclick="enviarMensajeCliente('${c.id}')">✅ Enviado hoy</button>`
+        : `<button class="btn-sm btn-success" style="color:#fff;" onclick="enviarMensajeCliente('${c.id}')">📤 Enviar</button>`}
+    </div>`;
+}
+function renderCardMensajeClientes() {
+  const lista = clients.filter(c => !c.eliminado && (c.porMensaje || c.recordarMensaje)).sort((a, b) => a.nombre.localeCompare(b.nombre));
+  const enviados = lista.filter(c => c.ultimoMensajeEnviado === fechaHoyLocal()).length;
+  const esc = t => String(t || "").replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  return `
+    <div class="form-card" style="border-left:4px solid #059669;">
+      <h3 class="section-title">✉️ Mensaje para tus clientes</h3>
+      <textarea id="textoMensajeClientes" rows="3" onchange="guardarMensajeClientes(this.value)" style="width:100%; box-sizing:border-box;">${esc(textoMensajeClientes())}</textarea>
+      <p class="muted" style="margin:4px 0 10px; font-size:12px;">Donde dice <strong>{nombre}</strong> va el nombre de cada cliente. Queda guardado para la próxima.</p>
+      <div class="muted" style="font-size:13px; margin-bottom:4px;">Tocá 📤 en cada uno: se abre WhatsApp con el mensaje listo, lo mandás y volvés. ${lista.length ? `(${enviados} de ${lista.length} enviados hoy)` : ""}</div>
+      ${lista.map(filaMensajeCliente).join("")}
+    </div>`;
+}
+
+function toggleFiltroMensajes() {
+  filtroMensajes = !filtroMensajes;
+  renderVistaClientes();
+}
+
 function abrirWhatsAppCliente(clienteId) {
   const c = clients.find(c => c.id === clienteId);
   if (!c || !c.telefono) return;
   const tel = c.telefono.replace(/\D/g, "");
+  marcarMensajeEnviado(clienteId);
   window.open(`https://wa.me/54${tel}`, "_blank");
 }
 
@@ -1812,6 +1911,7 @@ function abrirWhatsAppCliente2(clienteId) {
   const c = clients.find(c => c.id === clienteId);
   if (!c || !c.telefono2) return;
   const tel = c.telefono2.replace(/\D/g, "");
+  marcarMensajeEnviado(clienteId);
   window.open(`https://wa.me/54${tel}`, "_blank");
 }
 
@@ -2303,6 +2403,7 @@ function enviarRecordatorioPago(clienteId) {
   const tel = client.telefono ? client.telefono.replace(/\D/g, "") : "";
   const url = tel ? `https://wa.me/54${tel}?text=${encodeURIComponent(msg)}` : `https://wa.me/?text=${encodeURIComponent(msg)}`;
   if (!tel) alert("Este cliente no tiene teléfono cargado — vas a tener que elegir el contacto a mano en WhatsApp.");
+  marcarMensajeEnviado(clienteId);
   window.open(url, "_blank");
 }
 
@@ -2332,6 +2433,55 @@ function elegirMedioPago(orderId, medio) {
   document.getElementById("medioTransferencia-" + orderId).classList.toggle("active", medio === "Transferencia");
 }
 
+// ── Saldo a favor ─────────────────────────────────────────────────────────
+// Si un cliente paga de más, el excedente queda en client.saldoFavor y se
+// anota en client.movimientosFavor. Se usa después con "Usar saldo a favor"
+// (queda como un pago con medio "Saldo a favor") o se ajusta a mano.
+function saldoFavorCliente(clienteId) {
+  const c = clients.find(x => x.id === clienteId);
+  return c ? Math.max(0, Number(c.saldoFavor) || 0) : 0;
+}
+function sumarSaldoFavor(clienteId, monto, motivo) {
+  const c = clients.find(x => x.id === clienteId);
+  if (!c || !monto) return;
+  c.saldoFavor = Math.round((saldoFavorCliente(clienteId) + monto) * 100) / 100;
+  c.movimientosFavor = [...(c.movimientosFavor || []), { fecha: new Date().toLocaleString("es-AR"), monto: Math.round(monto * 100) / 100, motivo }];
+  c.actualizadoEn = Date.now();
+}
+// Pregunta si el excedente queda a favor. Devuelve true si aceptó.
+function preguntarSaldoFavor(nombre, excedente, tope) {
+  return confirm(`El pago supera lo que debe en ${formatCurrency(excedente)} (debía ${formatCurrency(tope)}).\n\n¿Dejo ${formatCurrency(excedente)} como saldo a favor de ${nombre}?`);
+}
+function usarSaldoFavor(orderId) {
+  const order = orders.find(o => o.id === orderId);
+  if (!order) return;
+  const favor = saldoFavorCliente(order.client.id);
+  const saldo = calcularSaldo(order);
+  const usar = Math.min(favor, saldo);
+  if (usar <= 0) return;
+  if (!confirm(`¿Uso ${formatCurrency(usar)} del saldo a favor de ${order.client.nombre} para este pedido?`)) return;
+  if (!order.pagos) order.pagos = [];
+  order.pagos.push({ id: generarId(), fecha: new Date().toLocaleString("es-AR"), monto: usar, medio: "Saldo a favor" });
+  if (calcularSaldo(order) <= 0) order.pagado = true;
+  order.actualizadoEn = Date.now();
+  sumarSaldoFavor(order.client.id, -usar, "Usado en el pedido del " + String(order.fecha).replace(/,.*/, ""));
+  ordenConFormPago = null;
+  guardarStorage();
+  renderVistaHistorial();
+}
+function ajustarSaldoFavor(clienteId) {
+  const c = clients.find(x => x.id === clienteId);
+  if (!c) return;
+  const actual = saldoFavorCliente(clienteId);
+  const r = prompt(`Saldo a favor de ${c.nombre}: ${formatCurrency(actual)}\n\n¿Cuánto tiene que quedar? (0 si se lo devolviste)`, montoParaInput(actual).toLocaleString("es-AR"));
+  if (r === null) return;
+  const nuevo = parseNumber(r);
+  if (nuevo < 0) return alert("Tiene que ser 0 o más.");
+  sumarSaldoFavor(clienteId, nuevo - actual, "Ajuste a mano");
+  guardarStorage();
+  renderApp();
+}
+
 function confirmarPago(orderId) {
   const order = orders.find(o => o.id === orderId);
   if (!order) return;
@@ -2339,11 +2489,18 @@ function confirmarPago(orderId) {
   const monto = parseNumber(input.value);
   if (!monto || monto <= 0) return alert("Ingresá un monto válido");
   const saldo = calcularSaldo(order);
-  if (monto > saldo) return alert(`El monto supera el saldo. Saldo pendiente: ${formatCurrency(saldo)}`);
+  let excedente = 0;
+  if (monto > saldo + 0.009) {
+    if (!preguntarSaldoFavor(order.client.nombre, monto - saldo, saldo)) return;
+    excedente = monto - saldo;
+  }
   const medioInput = document.getElementById("medioPago-" + orderId);
   const medio = medioInput ? medioInput.value : "Efectivo";
   if (!order.pagos) order.pagos = [];
-  order.pagos.push({ id: generarId(), fecha: new Date().toLocaleString("es-AR"), monto, medio });
+  const pago = { id: generarId(), fecha: new Date().toLocaleString("es-AR"), monto: monto - excedente, medio };
+  if (excedente > 0) pago.aFavor = Math.round(excedente * 100) / 100; // lo que pagó de más (quedó a favor)
+  order.pagos.push(pago);
+  if (excedente > 0) sumarSaldoFavor(order.client.id, excedente, `Pagó de más (${medio})`);
   if (calcularSaldo(order) <= 0) order.pagado = true;
   order.actualizadoEn = Date.now();
   ordenConFormPago = null;
@@ -2443,6 +2600,7 @@ function enviarWhatsAppPedidoActual() {
   const tel = client.telefono ? client.telefono.replace(/\D/g, "") : "";
   const url = tel ? `https://wa.me/54${tel}?text=${encodeURIComponent(msg)}` : `https://wa.me/?text=${encodeURIComponent(msg)}`;
   // WhatsApp se abre en el mismo toque (si no, el celu lo puede bloquear).
+  marcarMensajeEnviado(client.id);
   window.open(url, "_blank");
 
   // Si es un pedido nuevo, se guarda en el momento: al irte a WhatsApp el
@@ -2468,6 +2626,7 @@ function enviarWhatsAppPedidoGuardado(id) {
   const msg = construirMensajeWhatsApp(order, order.modoPrecio || "sin");
   const tel = order.client.telefono ? order.client.telefono.replace(/\D/g, "") : "";
   const url = tel ? `https://wa.me/54${tel}?text=${encodeURIComponent(msg)}` : `https://wa.me/?text=${encodeURIComponent(msg)}`;
+  marcarMensajeEnviado(order.client.id);
   window.open(url, "_blank");
 }
 
@@ -2552,6 +2711,7 @@ function venderYCobrar() {
   const tel = client.telefono ? client.telefono.replace(/\D/g, "") : "";
   const url = tel ? `https://wa.me/54${tel}?text=${encodeURIComponent(msg)}` : `https://wa.me/?text=${encodeURIComponent(msg)}`;
   if (!tel) alert("Este cliente no tiene teléfono cargado — vas a tener que elegir el contacto a mano en WhatsApp.");
+  marcarMensajeEnviado(client.id);
   window.open(url, "_blank");
 
   guardarStorage();
@@ -2574,13 +2734,20 @@ function enviarConfirmacionPago(id) {
   const deudaCliente = deudaTotalCliente(order.client.id);
   const nombre = order.client.nombre;
 
+  const favor = saldoFavorCliente(order.client.id);
+  const textoFavor = favor > 0 ? ` Te queda un *saldo a favor de ${formatCurrency(favor)}* para tu próximo pedido.` : "";
+  const recibido = ultimoPago.monto + (Number(ultimoPago.aFavor) || 0); // lo que transfirió de verdad
+  const inicio = ultimoPago.medio === "Saldo a favor"
+    ? `Hola ${nombre} 👋\n\nUsamos *${formatCurrency(ultimoPago.monto)}* de tu saldo a favor para tu pedido.`
+    : `Hola ${nombre} 👋\n\nConfirmo que recibí tu pago de *${formatCurrency(recibido)}*.`;
   const msg = deudaCliente <= 0
-    ? `Hola ${nombre} 👋\n\nConfirmo que recibí tu pago de *${formatCurrency(ultimoPago.monto)}*. Tu cuenta quedó al día. ¡Gracias! 🙌`
-    : `Hola ${nombre} 👋\n\nConfirmo que recibí tu pago de *${formatCurrency(ultimoPago.monto)}*. Tu saldo pendiente actual es *${formatCurrency(deudaCliente)}*. ¡Gracias! 🙌`;
+    ? `${inicio} Tu cuenta quedó al día.${textoFavor} ¡Gracias! 🙌`
+    : `${inicio} Tu saldo pendiente actual es *${formatCurrency(deudaCliente)}*.${textoFavor} ¡Gracias! 🙌`;
 
   const tel = order.client.telefono ? order.client.telefono.replace(/\D/g, "") : "";
   const url = tel ? `https://wa.me/54${tel}?text=${encodeURIComponent(msg)}` : `https://wa.me/?text=${encodeURIComponent(msg)}`;
   if (!tel) alert("Este cliente no tiene teléfono cargado — vas a tener que elegir el contacto a mano en WhatsApp.");
+  marcarMensajeEnviado(order.client.id);
   window.open(url, "_blank");
 }
 
@@ -3000,6 +3167,14 @@ function renderApp() {
             <span class="modal-icon">👋</span>
             <span>Visitado hoy</span>
           </button>
+          <button class="modal-btn" id="btnModalMandarMensaje" style="display:none;" onclick="enviarMensajeCliente(clienteActivoId); cerrarModal(); renderApp();">
+            <span class="modal-icon">📤</span>
+            <span>Mandar su mensaje</span>
+          </button>
+          <button class="modal-btn" id="btnModalRecordarMensaje" onclick="toggleRecordarMensaje()">
+            <span class="modal-icon">📱</span>
+            <span>Recordar mensaje</span>
+          </button>
           <button class="modal-btn" id="btnModalTelefono2" style="display:none;" onclick="abrirWhatsAppCliente2(clienteActivoId)">
             <span class="modal-icon">💬</span>
             <span>WhatsApp Tel. 2</span>
@@ -3032,14 +3207,6 @@ function renderApp() {
           <button class="btn-danger" onclick="eliminarClienteActivo()">Sí, eliminar</button>
           <button class="btn-gray" onclick="cerrarModalConfirmar()">Cancelar</button>
         </div>
-      </div>
-    </div>
-
-    <!-- Modal: ver imagen del producto -->
-    <div class="modal-overlay" id="modalImagenProducto" style="display:none;" onclick="cerrarModalImagen()">
-      <div class="modal-card" style="text-align:center;" onclick="event.stopPropagation()">
-        <button class="modal-close" onclick="cerrarModalImagen()">✕</button>
-        <img id="imgProductoModal" style="max-width:100%; border-radius:10px; margin-top:10px;" />
       </div>
     </div>
 
@@ -3389,10 +3556,17 @@ function renderVistaClientes() {
       <button class="tipo-tab" style="border-left:3px solid #2563eb;" onclick="abrirRuta()">🗓️ Ruta del día</button>
       <button class="tipo-tab" style="border-left:3px solid #f59e0b;" onclick="abrirOrdenarClientes()">📋 Ordenar</button>
       <button class="tipo-tab" style="border-left:3px solid #7c3aed;" onclick="setVista('mapa-rutas')">🗺️ Mapa</button>
+      ${(() => {
+        const nMsg = clients.filter(c => !c.eliminado && (c.porMensaje || c.recordarMensaje)).length;
+        const nRec = clients.filter(c => !c.eliminado && c.recordarMensaje).length;
+        return nMsg ? `<button class="tipo-tab ${filtroMensajes ? "active" : ""}" style="border-left:3px solid #059669;" onclick="toggleFiltroMensajes()">📱 Mensajes${nRec ? " (" + nRec + " pendiente" + (nRec === 1 ? "" : "s") + ")" : ""}</button>` : "";
+      })()}
       ${contarClientesInactivos() > 0
         ? `<button class="tipo-tab" style="border-left:3px solid #dc2626;" onclick="setVista('inactivos')">⏰ Inactivos (${contarClientesInactivos()})</button>`
         : ""}
     </div>
+
+    ${filtroMensajes ? renderCardMensajeClientes() : ""}
 
     <div class="search-box">
       <input id="inputBusquedaCliente" type="text" placeholder="🔍 Buscar por nombre, dirección o teléfono" value="${busquedaCliente}" oninput="buscarClientes(this.value)" />
@@ -3447,8 +3621,10 @@ const sinComprar = cuentaInactividad(c) && dias !== null && dias >= umbralInacti
                 <div class="client-tipo-dot tipo-${(c.tipo || 'Otro').toLowerCase().replace('é','e').replace('ú','u')}"></div>
                 <div class="client-info">
                   <div class="client-name">
-                    ${c.potencial ? '🌱 ' : ''}${c.nombre}
+                    ${c.potencial ? '🌱 ' : ''}${c.nombre}${c.porMensaje ? ' <span title="Lo atendés por mensaje">📱</span>' : ''}
+                    ${c.recordarMensaje ? ` <span style="display:inline-block; background:#d1fae5; color:#065f46; border-radius:10px; padding:1px 8px; font-size:12px; font-weight:600;">📱 Mandar mensaje</span>` : ''}
                     ${montoDeuda > 0 ? ` <span class="badge-deuda">💰 ${formatCurrency(montoDeuda)}</span>` : ''}
+                    ${saldoFavorCliente(c.id) > 0 ? ` <span style="display:inline-block; background:#d1fae5; color:#065f46; border-radius:10px; padding:1px 8px; font-size:12px; font-weight:600;">💚 A favor ${formatCurrency(saldoFavorCliente(c.id))}</span>` : ''}
                    ${sinComprar && !c.potencial ? ` <span class="badge-sin-comprar">⏰ ${dias}d</span>` : ''}
                     ${badgeSeguimiento}
                   </div>
@@ -3961,6 +4137,17 @@ function renderVistaFormCliente() {
         <input type="hidden" id="formClienteUbicacionManual" value="${c && c.ubicacionManual ? "1" : ""}" />
       </div>
 
+      <div class="form-group" style="margin-bottom:10px;">
+        <label class="switch-label">
+          <input type="checkbox" id="formClientePorMensaje" ${c && c.porMensaje ? "checked" : ""} onchange="document.getElementById('cajaMensajePropio').style.display = this.checked ? 'block' : 'none'" />
+          <span>📱 Lo atiendo por mensaje (no lo visito)</span>
+        </label>
+        <div id="cajaMensajePropio" style="display:${c && c.porMensaje ? "block" : "none"}; margin-top:8px;">
+          <label style="font-size:13px;">Mensaje para este cliente (cómo lo querés saludar)</label>
+          <textarea id="formClienteMensajePropio" rows="3" placeholder="${textoMensajeClientes().replace(/"/g, "&quot;")}" style="width:100%; box-sizing:border-box;">${c && c.mensajePropio ? String(c.mensajePropio).replace(/&/g, "&amp;").replace(/</g, "&lt;") : ""}</textarea>
+          <div class="muted" style="font-size:12px;">Si lo dejás vacío se usa el mensaje general. {nombre} se reemplaza por su nombre.</div>
+        </div>
+      </div>
       <div class="form-group potencial-box">
         <label class="switch-label">
           <input type="checkbox" id="formClientePotencial" onchange="togglePotencial()" ${c && c.potencial ? "checked" : ""} />
@@ -4144,7 +4331,7 @@ function renderOrderCard(order) {
   <div id="order-card-${order.id}" class="order-card ${order.pagado ? 'order-pagada' : 'order-pendiente'}"${order.id === pedidoRecienEntregadoId ? ' style="box-shadow:0 0 0 3px #059669;"' : ""}>
     <div class="order-top">
       <div>
-        <div class="order-cliente">${order.client.nombre}</div>
+        <div class="order-cliente">${order.web && order.web.nombre ? "🌐 " + order.web.nombre : order.client.nombre}</div>
         <div class="muted order-fecha">${order.fecha}</div>
       </div>
       <div style="text-align:right;">
@@ -4166,7 +4353,7 @@ function renderOrderCard(order) {
     ${(order.pagos || []).length > 0 ? `
       <div class="pagos-lista">
         ${order.pagos.map(p => `
-          <div class="pago-item">${p.medio === "Transferencia" ? "🏦" : "💵"} ${formatCurrency(p.monto)} <span class="muted">· ${p.medio || "Efectivo"} · ${p.fecha}</span></div>
+          <div class="pago-item">${p.medio === "Transferencia" ? "🏦" : p.medio === "Saldo a favor" ? "💚" : "💵"} ${formatCurrency(p.monto)} <span class="muted">· ${p.medio || "Efectivo"} · ${p.fecha}</span></div>
         `).join('')}
       </div>` : ''}
 
@@ -4188,6 +4375,8 @@ function renderOrderCard(order) {
           <button type="button" class="medio-pago-tab" id="medioTransferencia-${order.id}" onclick="elegirMedioPago('${order.id}', 'Transferencia')">🏦 Transferencia</button>
           <input type="hidden" id="medioPago-${order.id}" value="Efectivo" />
         </div>
+        ${saldoFavorCliente(order.client.id) > 0 ? `
+        <button class="btn-outline btn-full" style="margin-bottom:8px; border-color:#059669; color:#065f46;" onclick="usarSaldoFavor('${order.id}')">💚 Usar saldo a favor (${formatCurrency(saldoFavorCliente(order.client.id))})</button>` : ""}
         <div class="row-2">
           <button class="btn-success" onclick="confirmarPago('${order.id}')">✅ Confirmar pago</button>
           <button class="btn-gray" onclick="abrirFormPago('${order.id}')">Cancelar</button>
@@ -4286,6 +4475,15 @@ function renderVistaHistorial() {
       <h2 class="page-title2">${client ? "Pedidos de " + client.nombre : "Todos los pedidos"}</h2>
     </div>
 
+    ${client && saldoFavorCliente(client.id) > 0 ? `
+    <div style="background:#ecfdf5; border:1px solid #6ee7b7; border-radius:12px; padding:12px 14px; margin-bottom:12px; display:flex; justify-content:space-between; align-items:center; gap:8px;">
+      <div>
+        <strong style="color:#065f46;">💚 Saldo a favor: ${formatCurrency(saldoFavorCliente(client.id))}</strong>
+        <div style="font-size:12px; color:#065f46;">Se usa desde "💵 Registrar pago" en un pedido.</div>
+      </div>
+      <button class="btn-sm btn-outline" onclick="ajustarSaldoFavor('${client.id}')">✏️ Ajustar</button>
+    </div>` : ""}
+
     ${pedidoRecienEntregadoId && lista.some(o => o.id === pedidoRecienEntregadoId) ? `
     <div style="background:#dcfce7; border:1px solid #86efac; border-radius:12px; padding:12px 14px; margin-bottom:12px;">
       <strong style="color:#065f46;">${tituloBannerPedido}</strong>
@@ -4374,7 +4572,11 @@ function confirmarPagoTotalCliente(clienteId) {
   const montoInput = document.getElementById("inputMontoPagoDeuda-" + clienteId);
   const monto = parseNumber(montoInput.value);
   if (!monto || monto <= 0) return alert("Ingresá un monto válido");
-  if (monto > deudaAntes) return alert(`El monto supera la deuda total. Deuda actual: ${formatCurrency(deudaAntes)}`);
+  let excedente = 0;
+  if (monto > deudaAntes + 0.009) {
+    if (!preguntarSaldoFavor(client.nombre, monto - deudaAntes, deudaAntes)) return;
+    excedente = monto - deudaAntes;
+  }
 
   const medioInput = document.getElementById("medioPagoDeuda-" + clienteId);
   const medio = medioInput ? medioInput.value : "Efectivo";
@@ -4385,7 +4587,8 @@ function confirmarPagoTotalCliente(clienteId) {
     .filter(o => o.client.id === clienteId && !o.eliminado && !o.pagado)
     .sort(ordenarPorFechaAsc);
 
-  let restante = monto;
+  let restante = monto - excedente;
+  if (excedente > 0) sumarSaldoFavor(clienteId, excedente, `Pagó de más (${medio})`);
   ordenesPendientes.forEach(o => {
     if (restante <= 0) return;
     const saldo = calcularSaldo(o);
@@ -4411,7 +4614,7 @@ function confirmarPagoTotalCliente(clienteId) {
   // el celu abre la app de una y los emojis salen bien, igual que el resto
   // de los botones de WhatsApp.
   const avisar = confirm(deudaDespues <= 0
-    ? `✅ Pago de ${formatCurrency(monto)} registrado. La cuenta de ${client.nombre} quedó al día.\n\n¿Le avisamos por WhatsApp?`
+    ? `✅ Pago de ${formatCurrency(monto)} registrado. La cuenta de ${client.nombre} quedó al día${excedente > 0 ? ` y le quedó ${formatCurrency(saldoFavorCliente(clienteId))} a favor` : ""}.\n\n¿Le avisamos por WhatsApp?`
     : `✅ Pago de ${formatCurrency(monto)} registrado. Todavía le queda un saldo de ${formatCurrency(deudaDespues)}.\n\n¿Le avisamos por WhatsApp?`);
   if (avisar) enviarAvisoPagoRegistrado(clienteId, monto, medio, deudaDespues);
 
@@ -4422,12 +4625,14 @@ function confirmarPagoTotalCliente(clienteId) {
 function enviarAvisoPagoRegistrado(clienteId, monto, medio, deudaRestante) {
   const client = clients.find(c => c.id === clienteId);
   if (!client) return;
+  const favor = saldoFavorCliente(clienteId);
   const msg = deudaRestante <= 0
-    ? `Hola ${client.nombre} 👋\n\nRegistramos tu pago de *${formatCurrency(monto)}* (${medio}). ¡Tu cuenta quedó al día! Gracias 🙌`
+    ? `Hola ${client.nombre} 👋\n\nRegistramos tu pago de *${formatCurrency(monto)}* (${medio}). ¡Tu cuenta quedó al día!${favor > 0 ? ` Te quedó un *saldo a favor de ${formatCurrency(favor)}* para tu próximo pedido.` : ""} Gracias 🙌`
     : `Hola ${client.nombre} 👋\n\nRegistramos tu pago de *${formatCurrency(monto)}* (${medio}). Tu saldo pendiente ahora es *${formatCurrency(deudaRestante)}*. ¡Gracias! 🙌`;
   const tel = client.telefono ? client.telefono.replace(/\D/g, "") : "";
   const url = tel ? `https://wa.me/54${tel}?text=${encodeURIComponent(msg)}` : `https://wa.me/?text=${encodeURIComponent(msg)}`;
   if (!tel) alert("Este cliente no tiene teléfono cargado — vas a tener que elegir el contacto a mano en WhatsApp.");
+  marcarMensajeEnviado(clienteId);
   window.open(url, "_blank");
 }
 
@@ -5033,6 +5238,213 @@ function renderVistaPedidoWeb() {
   `;
 }
 
+// ═══════════════════════════════════════════════════════════════
+// PEDIDOS QUE LLEGAN DE LA WEB (pestaña "pedidos_web" de la planilla)
+// ═══════════════════════════════════════════════════════════════
+// El script de la web agrega una fila por pedido (JSON en la columna A). La
+// app SOLO LEE esa pestaña con el doGet de siempre (?tipo=pedidos_web) y NUNCA
+// escribe en ella: el guardado de la app borra y reescribe la pestaña entera.
+// Cada pedido nuevo (id "W-XXXXXX") entra como PENDIENTE DE ENTREGA (borrador,
+// no toca el stock) en el cliente especial "🌐 Venta web"; el stock se
+// descuenta cuando se confirma la entrega. La app anota el id en el pedido
+// (id "web-W-XXXXXX"), así un pedido no se importa dos veces ni desde otro
+// dispositivo.
+// Lo que viene de la web lo escribe cualquiera: se limpia todo texto para que
+// no pueda meter código en la app.
+function textoWebSeguro(valor, max) {
+  return String(valor == null ? "" : valor)
+    .replace(/[\u0000-\u001f\u007f<>"'`\\]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+// Resultado de la última lectura de la planilla, para poder explicarle a Joel
+// qué pasó cuando "no aparece" un pedido (se ve en Resumen → 🌐 Venta web).
+let diagWeb = null; // { cuando, error, filas, nuevos, yaEstaban, descartados }
+
+// Lee la pestaña. Si falla (sin internet, clave mal, la pestaña no existe
+// todavía) devuelve [] sin molestar: el resto de la sincronización sigue igual.
+async function traerPedidosWeb() {
+  if (!USAR_PEDIDOS_WEB) { diagWeb = null; return []; }
+  diagWeb = { cuando: Date.now(), error: null, filas: 0, nuevos: 0, yaEstaban: 0, descartados: 0 };
+  try {
+    const resp = await fetchConTimeout(API_URL + "?tipo=pedidos_web", null, 45000);
+    const filas = await resp.json();
+    if (!Array.isArray(filas)) { diagWeb.error = "formato"; return []; }
+    const pedidos = [];
+    filas.forEach(f => {
+      const texto = Array.isArray(f) ? f[0] : null;
+      if (typeof texto !== "string" || texto.charAt(0) !== "{") return;
+      try { pedidos.push(JSON.parse(texto)); } catch {}
+    });
+    diagWeb.filas = pedidos.length;
+    return pedidos;
+  } catch (e) {
+    console.log("No se pudieron leer los pedidos de la web:", e);
+    diagWeb.error = /clave/i.test(String(e && e.message)) ? "clave" : (e instanceof SyntaxError ? "formato" : "red");
+    return [];
+  }
+}
+
+// Texto simple de lo que pasó en la última lectura.
+function textoDiagWeb() {
+  if (!diagWeb) return { malo: true, texto: "Todavía no se pudo revisar la planilla (sin conexión, o ya había una sincronización en curso). Probá de nuevo en unos segundos." };
+  const d = diagWeb;
+  const hora = new Date(d.cuando).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", hour12: false });
+  if (d.error === "clave") return { malo: true, texto: `Revisé a las ${hora}: Google rechazó la clave. Revisala en 💾 Backup → 🔑 Clave de Google.` };
+  if (d.error === "red") return { malo: true, texto: `Revisé a las ${hora}: no pude conectarme con Google. Revisá la conexión a internet.` };
+  if (d.error === "formato") return { malo: true, texto: `Revisé a las ${hora}: Google contestó algo que la app no entiende (por ejemplo, una página de error) y no se pudo leer la pestaña pedidos_web. Avisale a Claude.` };
+  if (d.filas === 0) return { malo: false, texto: `Revisé a las ${hora}: la pestaña pedidos_web está vacía (o todavía no existe). Es decir, desde la web no llegó ningún pedido a la planilla. Si ya tendría que haber alguno, revisá que la web esté encendida y hacé un pedido de prueba.` };
+  const partes = [`${d.filas} pedido${d.filas === 1 ? "" : "s"} en la planilla`, `${d.nuevos} nuevo${d.nuevos === 1 ? "" : "s"} para la app`, `${d.yaEstaban} ya estaba${d.yaEstaban === 1 ? "" : "n"} en la app`];
+  if (d.descartados) partes.push((d.descartados === 1 ? "1 no se pudo leer" : `${d.descartados} no se pudieron leer`) + ` (formato raro${d.motivo ? ": " + d.motivo : ""})`);
+  return { malo: d.descartados > 0 && d.nuevos === 0 && d.yaEstaban === 0, texto: `Revisé a las ${hora}: ${partes.join(", ")}.` };
+}
+
+async function revisarPedidosWebAhora() {
+  diagWeb = null;
+  // Si justo se está guardando o sincronizando algo, espera a que termine
+  // (como mucho 30 segundos) en vez de rendirse.
+  const inicio = Date.now();
+  while (syncEnCurso && Date.now() - inicio < 30000) await new Promise(r => setTimeout(r, 400));
+  await forzarRecargaDrive();
+  alert("🌐 Pedidos de la web\n\n" + textoDiagWeb().texto);
+  if (vistaActual === "resumen") renderVistaResumen();
+}
+
+// Producto de tu lista que corresponde a un renglón del pedido web. Si la
+// web avisa que no lo encontró en el catálogo (enCatalogo: false), no se
+// adivina: queda marcado para revisarlo a mano.
+function productoDeRenglonWeb(it) {
+  if (it.enCatalogo === false) return null;
+  let prod = it.productId ? catalog.find(p => p.id === it.productId && !p.eliminado) : null;
+  if (!prod && it.codigo != null && String(it.codigo).trim() !== "") {
+    prod = catalogActivo().find(p => codigoDeProducto(p) === String(it.codigo).trim());
+  }
+  return prod || null;
+}
+
+// Convierte una fila de la web en un pedido de la app. Devuelve null si la
+// fila no sirve (id raro, sin productos).
+function pedidoDesdeFilaWeb(w) {
+  if (!w || typeof w !== "object") return null;
+  const webId = String(w.id || "");
+  if (!/^W-[A-Z0-9]{6,12}$/.test(webId)) return null;
+  if (!Array.isArray(w.items) || w.items.length < 1 || w.items.length > 40) return null;
+
+  const items = w.items.map(it => {
+    const prod = productoDeRenglonWeb(it);
+    const cantidad = Math.min(500, Math.max(1, Math.round(Number(it.cantidad) || 1)));
+    const unit = Math.min(10000000, Math.max(0, Number(it.precioUnit) || 0));
+    const sub = cantidad * unit;
+    const item = {
+      id: generarId(),
+      productId: prod ? prod.id : "",
+      nombre: prod ? prod.nombre : textoWebSeguro(it.nombre, 80) || "Producto sin nombre",
+      categoria: prod ? prod.categoria : textoWebSeguro(it.categoria, 40),
+      cantidad,
+      precioVentaSinIVA: unit,
+      precioVentaConIVA: priceWithIVA(unit),
+      subtotalSinIVA: sub,
+      subtotalConIVA: priceWithIVA(sub)
+    };
+    if (it.mayorista) item.mayorista = true;
+    if (!prod) item.sinProducto = true; // hay que revisarlo a mano antes de entregar
+    return item;
+  });
+
+  const c = w.cliente && typeof w.cliente === "object" ? w.cliente : {};
+  const web = {
+    nombre: textoWebSeguro(c.nombre, 80),
+    barrio: textoWebSeguro(c.otroBarrio || c.barrio, 80),
+    direccion: textoWebSeguro(c.direccion, 120),
+    notas: textoWebSeguro(c.notas, 400),
+    hora: textoWebSeguro(w.hora, 5),
+    fueraDeHorario: !!w.fueraDeHorario
+  };
+  const mapa = String(c.mapa || "");
+  if (mapa.indexOf("https://www.google.com/maps") === 0) web.mapa = textoWebSeguro(mapa, 300);
+  const lat = Number(c.ubicacion && c.ubicacion.lat), lng = Number(c.ubicacion && c.ubicacion.lng);
+  if (isFinite(lat) && isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180 && c.ubicacion) web.ubicacion = { lat, lng };
+
+  const total = items.reduce((a, i) => a + i.subtotalSinIVA, 0);
+  const totalWeb = Number(w.totalInformadoPorLaWeb);
+  const lugar = [web.direccion, web.barrio].filter(Boolean).join(", ");
+  const partes = [];
+  if (web.nombre) partes.push("🌐 " + web.nombre);
+  if (lugar) partes.push("📍 " + lugar);
+  if (web.notas) partes.push("Notas: " + web.notas);
+  if (web.mapa) partes.push("Mapa: " + web.mapa);
+  if (web.fueraDeHorario) partes.push("⏰ Pedido hecho fuera de horario");
+  if (isFinite(totalWeb) && w.totalInformadoPorLaWeb != null && Math.abs(totalWeb - total) > 0.5) {
+    partes.push(`⚠️ La web informó ${formatCurrency(totalWeb)} pero los productos suman ${formatCurrency(total)}: revisalo`);
+  }
+
+  const fecha = /^\d{2}\/\d{2}\/\d{4}$/.test(String(w.fecha || "")) ? w.fecha
+    : (() => { const [y, m, d] = fechaHoyLocal().split("-"); return `${d}/${m}/${y}`; })();
+  const cliente = asegurarClienteWeb();
+  return {
+    id: "web-" + webId,
+    webId,
+    fecha: web.hora ? `${fecha}, ${web.hora}` : fecha,
+    client: { ...cliente },
+    items,
+    notas: partes.join(" · "),
+    modoPrecio: "sin",
+    pagado: false,
+    pagos: [],
+    borrador: true,
+    canal: "web",
+    web,
+    // Con la hora en que se hizo el pedido en la web (sin pasarse del reloj
+    // de este dispositivo): si dos dispositivos lo importan a la vez salen
+    // iguales, y cualquier cambio posterior (confirmar la entrega, por
+    // ejemplo) siempre le gana.
+    actualizadoEn: Math.min(Date.parse(w.creadoEn) || Date.now(), Date.now()),
+    totals: { totalSinIVA: total, totalConIVA: items.reduce((a, i) => a + i.subtotalConIVA, 0), totalCantidad: items.reduce((a, i) => a + i.cantidad, 0) }
+  };
+}
+
+// Agrega a los pedidos los que la app todavía no tiene. Devuelve cuántos.
+function aplicarPedidosWeb(filas) {
+  if (!Array.isArray(filas) || !filas.length) return 0;
+  const conocidos = new Set(orders.map(o => o.webId).concat(orders.map(o => o.id)));
+  let nuevos = 0;
+  let yaEstaban = 0, descartados = 0;
+  filas.slice(-300).forEach(w => {
+    const id = w && typeof w === "object" ? String(w.id || "") : "";
+    if (conocidos.has(id) || conocidos.has("web-" + id)) { yaEstaban++; return; }
+    // Una fila rara no tiene que frenar a las demás: se salta y se cuenta.
+    let pedido = null;
+    try { pedido = pedidoDesdeFilaWeb(w); } catch (e) {
+      console.log("Fila de pedido web ilegible:", e);
+      if (diagWeb) diagWeb.motivo = String((e && e.message) || e).slice(0, 80);
+    }
+    if (!pedido) { descartados++; return; }
+    orders.unshift(pedido);
+    conocidos.add(pedido.id); conocidos.add(pedido.webId);
+    nuevos++;
+  });
+  if (diagWeb) { diagWeb.nuevos = nuevos; diagWeb.yaEstaban = yaEstaban; diagWeb.descartados = descartados; }
+  return nuevos;
+}
+
+function avisarPedidosWebNuevos(n) {
+  if (n > 0) mostrarAvisoPedido(`🌐 ${n === 1 ? "Llegó 1 pedido nuevo" : "Llegaron " + n + " pedidos nuevos"} de la web: están en Pendientes de entregar.`);
+}
+
+// No dejar entregar un pedido de la web con un producto que no está en tu lista
+// (no se sabría de cuál descontar el stock).
+function productosWebSinResolver(items) {
+  return (items || []).filter(i => i.sinProducto && !catalog.some(p => p.id === i.productId && !p.eliminado));
+}
+function avisoProductosWebSinResolver(items) {
+  const sin = productosWebSinResolver(items);
+  if (!sin.length) return false;
+  alert(`Este pedido tiene un producto que no está en tu lista: ${sin.map(i => i.nombre).join(", ")}.\n\nSacalo del pedido y agregalo desde tu lista (o cargalo antes en 📦 Stock → ➕ Nuevo), así se descuenta bien el stock.`);
+  return true;
+}
+
 // Resumen: lo vendido por la web en el mes, comparado con el reparto.
 function toggleVentaWeb() { ventaWebAbierto = !ventaWebAbierto; renderVistaResumen(); }
 
@@ -5070,6 +5482,12 @@ function renderCardVentaWeb(mesSel, anioSel, mesNombre) {
           <div><div class="stock-nombre">${t.nombre}</div><div class="muted">${formatCurrency(t.total)}</div></div>
           <div class="ventas-cant">${t.cantidad} u</div>
         </div>`).join("") : `<p class="muted" style="margin:8px 0 0;">Todavía no hay ventas web entregadas en ${mesNombre}.</p>`}
+      ${USAR_PEDIDOS_WEB ? `
+      <div style="margin-top:12px; padding:10px; border-radius:10px; background:${diagWeb && textoDiagWeb().malo ? "#fef2f2" : "#f3f4f6"}; font-size:13px;">
+        <div style="font-weight:600; margin-bottom:2px;">📥 Pedidos que llegan solos de la web</div>
+        <div class="muted">${diagWeb ? textoDiagWeb().texto : "Se revisan solos al abrir la app y cada 2 minutos. Tocá el botón para revisar ahora y ver qué pasó."}</div>
+        <button class="btn-sm btn-outline" style="margin-top:8px;" onclick="revisarPedidosWebAhora()">🔎 Revisar ahora</button>
+      </div>` : ""}
       <button class="btn-primary btn-full" style="margin-top:10px;" onclick="abrirPedidoWeb()">🌐 Pegar pedido web</button>`;
   }
   return `
@@ -5212,7 +5630,7 @@ function renderVistaRuta() {
       <div class="client-item" style="flex-direction:column; align-items:stretch; gap:6px; ${comproHoy || visitadoHoy ? "opacity:0.6;" : ""}">
         <div style="display:flex; justify-content:space-between; gap:8px;">
           <div>
-            <div class="client-name">${c.nombre}${comproHoy ? " ✅" : visitadoHoy ? " 👋" : ""}</div>
+            <div class="client-name">${c.nombre}${c.porMensaje ? " 📱" : ""}${comproHoy ? " ✅" : visitadoHoy ? " 👋" : ""}${c.recordarMensaje ? ` <span style="background:#d1fae5; color:#065f46; border-radius:10px; padding:1px 8px; font-size:12px;">📱 Mandar mensaje</span>` : ""}</div>
             <div class="client-sub">${c.zona ? "📍 " + c.zona + " · " : ""}${textoFrecuencia(c)}${dias !== null ? " · última compra/visita hace " + dias + " día" + (dias === 1 ? "" : "s") : " · nunca compró"}</div>
             ${faltaElegirSemana(c) ? `<div style="font-size:12px; color:#92400e;">⚠️ Falta elegir en qué semana le toca (📋 Ordenar clientes)</div>` : ""}
           </div>
@@ -5841,10 +6259,6 @@ function renderVistaResumen() {
     <div class="form-card">
       <div class="table-header-row">
         <h3 class="section-title" style="margin:0;">📦 Productos vendidos</h3>
-        <div style="display:flex;gap:6px;">
-          <button class="btn-sm btn-outline" onclick="exportarExcelDia('${fechaMostrar}')">📥 Día</button>
-          <button class="btn-sm btn-success" onclick="generarExcelModelo()" style="color:#fff;">📊 Mensual</button>
-        </div>
       </div>
       ${productosOrdenados.map(([nombre, p]) => `
         <div class="stock-row">
@@ -5999,8 +6413,9 @@ function renderVistaResumen() {
             <button class="btn-sm btn-outline" style="padding:2px 8px; ${i === lista.length - 1 ? 'visibility:hidden;' : ''}" onclick="moverPedidoBorrador('${o.id}', 1)">▼</button>
           </div>
           <div style="cursor:pointer; flex:1;" onclick="editarPedido('${o.id}')">
-            <div class="stock-nombre">${i + 1}. ${o.client.nombre}</div>
-            <div class="muted">${o.fecha} · ${o.items.length} producto${o.items.length > 1 ? "s" : ""}</div>
+            <div class="stock-nombre">${i + 1}. ${o.web && o.web.nombre ? "🌐 " + o.web.nombre : o.client.nombre}</div>
+            <div class="muted">${o.fecha} · ${o.items.length} producto${o.items.length > 1 ? "s" : ""}${o.web && (o.web.direccion || o.web.barrio) ? " · 📍 " + [o.web.direccion, o.web.barrio].filter(Boolean).join(", ") : ""}</div>
+            ${productosWebSinResolver(o.items).length ? `<div style="font-size:12px; color:#dc2626;">⚠️ Tiene un producto que no está en tu lista</div>` : ""}
           </div>
           <div style="text-align:right; margin-left:auto; cursor:pointer;" onclick="editarPedido('${o.id}')">
             <div style="font-weight:600;">${formatCurrency(o.totals.totalSinIVA)}</div>
@@ -6234,26 +6649,6 @@ const BLISTER_12 = ["Almendra", "Chocolate", "Proteína"];
 // listo para mandarlo a RawBT antes del texto del remito.
 const LOGO_TICKET_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAYAAAAF/AQAAAABoeCPeAAABCGlDQ1BJQ0MgUHJvZmlsZQAAeJxjYGA8wQAELAYMDLl5JUVB7k4KEZFRCuwPGBiBEAwSk4sLGHADoKpv1yBqL+viUYcLcKakFicD6Q9ArFIEtBxopAiQLZIOYWuA2EkQtg2IXV5SUAJkB4DYRSFBzkB2CpCtkY7ETkJiJxcUgdT3ANk2uTmlyQh3M/Ck5oUGA2kOIJZhKGYIYnBncAL5H6IkfxEDg8VXBgbmCQixpJkMDNtbGRgkbiHEVBYwMPC3MDBsO48QQ4RJQWJRIliIBYiZ0tIYGD4tZ2DgjWRgEL7AwMAVDQsIHG5TALvNnSEfCNMZchhSgSKeDHkMyQx6QJYRgwGDIYMZAKbWPz9HbOBQAAAU5ElEQVR4nL2cz48mx1nHP11vZ94OmUx3ggQj5Ozbkg+RUA4TLhhY9u0kF9/gyCmMxD+wASF8WPzW2otsAZL9B1jK3DhzgwN2rdeKc8KLkBAnXLM2yqBgucaekJ51Tz8cqqp/vT2zM0rgOcy83VXffn7UU089VV3VyCxpSOZLmLvZAsDm2gDtAbM85gCWQMvrARo6Wl8LYHrA4jqABmAlUs+z2AYYCDdnWWwB2v65zZxptwAO8rnfkRQTepPExd+55rNp+ZRDA6v+qt5Wewpw4/bVWzJNAZMabss/JoDWy9h0bbAl0wTgWEpoM6+Mnco0ARjWnXfDRqSZtt0EACJivOCaRbxzKaBhKdJERTVrETs08xbAshYxnT+wCM+4FKARaXo1a9YiE8OOAC0LETuooJdDhtuAhpXI2DUCm0sAjo3UY9dYSTtuiRHAJCJmVOwWInpxKYClyFjiFhHLZYCGldSThjWriRLDDtRwyMlz4+7ywgk72OGdAdgmU4m8THrYdEOAWUqzFSbMWuziEgC5uHwKcLm4YaWBDhcc8PjutM/vnbFLNatDjUjXam4Vf+lx4w8ANpGmU683vl2PtB4AzLJ/btvHvDofaT3Qwezz+ND/fKjgH7X/vXPGfjunQ8u6U0F3UUNEtDSD1ukBDdJGWbugISJiNzJwjh5QJ1KvIhb6OFyvROddtV6Hkx1ODqNTDWnnhMN6RgeTiwk/HTAYEhfiFjMcTMH3ws9szOefyAZm6o20afJ5Dm7d9mbqAA2dzmGg7hStVwMzdSI1SafzRen/Vb3W2m6J5JadztEkHYuF2HyLg8t4xJTOPa+3KXq7RqRe+XZ2f9JxWIr1ittNH606AOtmJSJikg7AvTA41OumqxdFEkxTAhh52jdNUDx9vEBPRGoSsZ4TbEyvhbf0UvR6wqFRHAOcA+Z5zZjuUXV27a36amzkjbB8s1NcRORhb9cIsHmbi/iusxby4cAo4jZuOQGYlTeSlzv5YZdmrb2ZupgbdTClN5IGHO6QcqhDatPIMgJ0VVex+LTa6+taAOWUjJVuEzmWqANr6TM/L/trojcjkVrFE6JIXsbw/xyA21TxhsfVS1mKxKzhzjoEjtvRTFbsamQlF6zapSW+f653wxPdJsb1IJIr2gKg8zsPsJ8tTwHITFaPrGS9VeWxv/yY1/1zErsX7dqMAMZb9WlnWq98zX6o5lRsiKDKxg5UgJf9g5I6doNly1DpFnkoMsjrn/u+/38YrC+vxuEyiJTwLiBlBHDL/zuK1v9+10IiItIsZCnDicC9TrhgfidmPeDQpJIxDMI/7Vra+X+ZLu3ASnXWFgxagbeW6BSAwt9ITeEGAFc0Zf80AN7nrxmSDS3nAbaMzr0TxXoxOQDgo9LXc6HlgpUqpwELX14YgLQ+CFq0nwCQ1KGm/2dIwoOLbtT/RmjaMz9a3CNch+Z7FHx77W9/TS7eihr5KPkotLECkIT3gBYwPu6tXmq/HdX1vfAWWnccmoXkwZPEwWGxqP/s80edzZbDlvM6pFIAKVA5+LdvsXztQdkBGoBMl73SDW0JLCzUFl6soHXY2wHQAqQmZHK+g9Yb8ZEityRybyntNz9PYsMvRETale+kKhgTIFj0Ft87ITm52BmM5hAHY0RE7NqJiDRkJJbPRT4V+cCtxnbNfTKlACy+q1OgSj6p7M+B7LCzKwAveeUVgKmeeN0PkYTSuj2o0Z2ZCoDbvld7Hbwr17sP7qkdcPvpCb8BH70SADXAraTXIZHXRETcWtrdPXZ+/fP2D+TUyaNlACxFRI5FRx0EH4ZODcm7v0lykiUG4L3f3vGABiAPsUdE2kW7EhH5XMTPDc/lDTk9lbzNTW+memM2gUOb+uFj9yIrccjvL6jA3S8A7sCpBUgpTVC6Ca4ufOGwsPhu8gJKdJkUZfbQJHtfB8D7hgLImgrgqW5rvgXVIY0feuzip5SKXQBli2glt3I+9sBS2n2EvYV8DnIh7/9ELJ/60JTXuYwnHAW8TvLx7c/cD97mE9Zgs384LmNAju0uYtfHEnqoiIh8KmLFspHmh/+81l0u91qzDBysH99akt+LnIqKhUYdfWb6R9+miUpXsXne60qtvQ1UD2sNL4V7Kv4x+j0IHiP6CGDXmQpg5wu6AfVW0gYdtLwhIgKsRdYffiEi7RIRae+sHJ0Op5KEASWRPOi8EHnng3PvYyIiL6zd13Sc7jrREdCuAgCRD39yISKiExGRQpwQ5x71RnsriaIEngJo+BUBqBTADzhFw328M1XaK+0zlacl8AAkBShTbxKfUPwWAKY0oKD1dv2qAVo5GOQbpKSnGvigsyoKmqwfqiT5939tjiAElQzzuG85W1hApM4734OV82mKz/G6TG4jIpK7lQgibnUaXQnyeiWvdoBV5J2LiLxR58FbHdFKFH9juQMxGJ4tulW/4AoKXKm6Sw7vQUnI3DgvbkMFqgao0jqobju9DEDemeCECg4IA1qMfLZKo1m+/TsayKIQLRjIoDUApWpiqIyPfHGn41UCDeVj+C8DLwS8B+gQyFn8lQZITXzG4sMz+LUSqQCKxAOMb9oTuJdoABV1qnd5G7IiaCm0oCDxJvT3OhsCuIIDr53zWmpQoCUa6HUSA5y7XpHl0IZaQIH3btHACRYuvhzHKluRasxOaMaUCpSXDH4EZG8dn8AZ50GwSsPRsU1inmPQfdRoAP68PC94DEdU+CxafVwatB/SFCUoWp/XVACp6DMqcGAhSyC5UI/frEIfsRjPQYeB7+7P4OIvOfB+de5j0Df+/s3nfbt4B5Emd8G59zfvS2JYiEnE5GJYisjpqs6l9BOV3K1F0XS5EvJHsnfALi+IVzEDlja9y39422osqksDYJ/D9mCXA3bQJaIpgFQvDPCf+KYDcatjEWlgUYvUG0lEWtZ2WfuO2ebyjkjJRkReq3NB3OojEal9DuJni8LKLl2IX+/Lh2HFUN6vc1FQWrqU9Tj4gAPnPZEDspgKNimkOFJgB+4B797xiBps6BsZX4Ps4R2gpEaFJgtd4kHwiQZM7CUsYfkCvq1920AceEOlsgXdWQ+Cb+4BCssgTz8Y1CmHAJ+I06Dw6aVXuq38/UKQ0ToXMV0FMbISEce+iDTeqlJzmM68N6hlISp098d886LsJhApl1CLIgmOUy10mEeCwjTJTH3tO1AJ6EP4Qx53RXbu+SmgwvCRaMjku6EkiWpOSUAWzVpEFv8tYvsFH2ZfhzRrIwrf1M/9Khz1aYj2/C+CP3WqQZiJSwm80xxOJHjAA+6PMFr5Rm4ruKgaPa5/obkY3bKgSNFe50aPLJnBGXA0uJVQRlso4Jx+VaYC4DFwMpFStd107+s0F0mSJGVXaGDwEMBhFFlMkdMQDkKvK7xLj+K5LgbNk9j4K7IYLmn2IvU/O8DH4f94QTECmm4G+uN4rw1MahbDN2FAjVUUkUkRb0exHc/50bCjKhuIdHHU/TRRxkN2mFAP+FnV/bQRpxk7E6DqWPw/GhYN0oTxpvReXg1rNzgVcq8uMrGoY1PqHSaxo0wHIhXxx7KzZza8vaVDTyZOJ4aMrwKUcbWqYBJAWlCuT00GwhVASzl9YkGtqKZMfYoQaRxt1KxIXRytZgrnAGokpR4XXhoUu7qbwQ2fnOhpvWQ+7gX2dqtpItXb0TWjUdsMZngOmM9G0NGqzlSky4tuAKiuBMgVZVukUROP91TDrCIprTJXsJ8hreaGsqvol2Ol8v+cw9WA2RgNUMyUmBty8PlSdTOMnrlphxc/HhVt7xPYQj0d354H+Mjj3fKdkQyVupxFjFfmGhwC6ZFs1wAMUFcDvBApBpCJZ/2SfKnw/yzbo/ssQOPAKRzbIflKkeqZe3OAoGcSQPraHPRTGGSmlwNaKi+PACZ5NiCsqFGhfVb4LEAUu+SIi+mQMwdwgU/BCWfTgXoOYBPvHBnnm2I63swBKgBaUnhlK0jNAM5jBq8G8KsAmddTQsvpqwAXKUkCWRgzNLDgKkCgIlQ/ZHsgnwUctgCGfZgsVF7q3gCWHbbnNnOARUzJEstyWqhmIu5z3Ri3ur/VJWZb2jtHDbw8LTMzgFUQfDb1JtXDq0VoAAOXJPeJmoZCIJhpvBIUadasFwM+I2ovyfrO/L/H2yXVPIdQ87PriuRXxPr/zwQ8iT/evR7guCT43NyAprbTpXIg3FbWjKqmdy6GqPNkwkSrLQf2HtH1m8GbTGhQimnCdALsUnXPGU1G9YzSR8ABqotHUx/0yxqRcr+wW9PS4Fdqh+sbtSzGHB6eFq8AizpJWGj+RcxKprHSbDoOQeq1zd1CtFiWUi/jzjjPoV2osk83vT0SY++6FHRhG9KGg4GL1KRpH9rCsske32kfZlTvZG+1LC7Ixm470OFkZdc1HMgOpqA06UJAV6k0Z7FKMp5PW8yypmr30SUFyhjN4WP04uV5Dt/j74BEnx0KhszCgaE4VYY/HlrJrl8L6yi55CJ2IU7qRKRZtus6l+ZuvpJ6Hax02izT7t3sewcXB/D835JLtoTFU+AMlf/pHjtRa/eVrBPp4jvmzHD+XIEo9oF3NOlFBX/xEskPdK+AW7/vW20lj0SsrMV5b6hX65aVrGUh3e6ij5q8c+OVlXuGb/684jFrgKUmab7CIZ9APvBAt3oUV49E2k0jEheWPvhA5CP5QNqossijOqdefTRcczqVblOSiMi5/HxY+n69mvaHPRZucLlzrQn4laRwl6b322RqVHrpXHSGMsr/jxlKfflUcYu0Q6ktw11BRXgpdjORmivm2xMSQD1jHWFMpeWmc1EdV6WvRS2gaBVwmmQk6+SNJPlyUpwukvRUHX8peZiUXCT6OClJMoDKdAu0PIXW/z6jG6k54YyjQcj3qw4WQHQM7ENnbHC4LuQ3vqKsRNpcr4/dvb1beZ6bdvXQvpw369fqlxFzb9ms7otdi0gtiagQZYqXLLxKWWgOoNz3hkgsD19tFFV8XeUTBwehNbw+um+bQr/C21D6Fc8av5ijAZSLo93QtzKTsoLw1ET8y6Da6z+3wpHGkTqN/+KqNNSg74LemvkUAEYHLn2Cpf0AqnEa/Gt9wBagsUH+FhRFvw74JDHcPS2BF0c8jr/r9zZYMhTYshNYR22M9rdUCxmkXu40vITst7kdAdsrppD5VjaAIuviTGJcKJ1OAg7ktAIyCtRwleeFGv8aNalNx5WaWzZc1X5lvbP/Mt4lDVV6R2wB7VfWa982ms+8IJpBuCoBkhBOCxdKdBS9gWn64nzx+tPgCQo1iAJV9yf4VeNfQL4U2VUoaMJUHpnJuauaY0LLt/51QljrawvCbpjSgxqAE+5h4LZ/pVz5jKzFAmdl8DAEaMqaCjjSF7wSuQVR5L6sxMGGu7u5S+rEFUtY37cvY0jEsLQLy8rkUst9vxPBN53GxKzlC6ikfBlQ/v2dpxodlos0sIBEH0T7JvowAdgl69+gJeB7ks6Ae1BV4mPtl8732N9RsHAsMafB29xXYySuyAUE1jS0fAqwrBEaQMgbBJy3poLSzE+Ptsi2aXCN8nqAsMGCwl5zpDZNFjgU1wOEda1uN8UzKXersDki06fJM6mUIuiQ1ulVq8qRHLgydi1zHRXaMnBQjbqe2pWtIIWkxebXyB/OMTqI1J8xuopqDQz3/jyLnCQSd0jNrW1tkd8vp4BK3766qqcnogLg+qlAAJRxc+rV9F7r12z6bWHPcqWtbWHwUA8uLslzRKQOexilYS8n0bSQS00uJHqHsCm2XblV5FCnXu0zzvon/Xh4AbR+o6UiDr6AG8ZV06U0garuVZVqwtTWDsv1ZNxqsFUA0AZnMkPdJtfU2kSl455EITe5y91SLNJwh7XN3drm/tTCYE9ifPskHBxA6OwNDwdHEoCw2curG52pf9WmWVC5YfUnvssogMrcgi7nA2xFPY1v77WqA5Rhj1PSDXca0onXv95FPihspoFmMNzi+vi2tIAUw23DQVjVd1aznfT78dwHsugbAKcFPCwBwoa00xKgLV3RAdJ+j9Ol1HjPCCI1W3Fj6wF1aBVvqrbbd+hJb3M4xW86TAESYRwGpFwNrhzAk1taepG07v06d12lQAWAkaQXiSpks2GpLsTN0G65BXgQqoaWMkUQ+2go2WCyI/HAjgeUNjNASxtnCvU0GhZNOgAULh09cFlT9Hqcl9CWIXHzgKxWFsJIDm2WQjNK25vKN3QApE3iQKHrWKfJfFYUudQ65MNB9dByJpYDQlUU3bL3aezgKpb+LiQ8KgugboCUb1BS2wB/gg5QHzcRKyIa1iQag+EOsHF+TXclsoxnMQIHrQsN1WDhPcHnRdo/NgsNHUWqTGagHLqdJiGNEbktWjUClDa1UAwj9iE7dKuxTRnaLd4onHKwx+CIy3Psk+jd8K6m6gzuVQnnUC4G48fo0GV/DiVwSBvuMQwacDJcZD7u5jFRlZbvMybLm/3Fj0J/60QSNm4zHtLM8HRe3h0cikJok5kxh+dtb7K2uIgXEVDZOCnprDR489CUjZoASqfcRIllb4K6qvsVW0/x1NSQHnW/Bqem4lOyJqyuDqgPPe8Sdof3IqUtqymgpweYciJSi7j1VKZITd4fPN06vTZHc6fX0FZNN0N1dFIN9q1FpM23zdQbqT+oOHfGb4tmz/hlTyn1vESSclT0V9ESg3OKU51nzykqdOrmOdTlcPtg9xy9kpn9ciIiZtj7Zk9zbuk8e5qzrC/RWlJcH9h7QPGU/aM5wNN9jgZxvOM1PPM6ovGZ156DokqezjDgSF8MX132T9IrMZttBu1iFKIuORk8oMtPBpdP2Z1x2JMDjoZrh4NHDU83DyS99HRzw3pGiXYhzfDU+C9yQhtds3s2VeHxAW6U5w/ANpn5MMRVp8xrNt0w0N1bSjv6BMGNT8r/Qmfxb37a/8bfE7jkiwWrYZ3RLEtxAvZJf+P1JZxwyCXtEL+6sOoZrK/+6kL8rkNX+MzvOtQ3/XKE5z/6NoWe1hhf3vjrFzf+vkYT3jLF+s/8gkf3jZAwftXP+kaI2OlXSKaxbQq48XdORA9Z6C2JfgnfatmD0yq4WQF3twLb9Ak3/t7Mzb9oc+Nv5tz8qzxXf/cnmVuJiqFxrmzLrNAtAm/mymY5eB7zJf8Ll4sE1Gig/EgAAAAASUVORK5CYII=";
 
-// Imágenes de productos para mostrarle al cliente mientras armás el pedido.
-// Cada foto es un archivo en la carpeta img/productos (se baja solo cuando
-// tocás "Ver imagen"). Para agregar otra: subí el archivo a esa carpeta y
-// sumá acá una línea: "NombreExacto": "img/productos/archivo.webp"
-const IMAGENES_PRODUCTO = {
-  "Almendra": "img/productos/almendra.webp",
-  "Chocolate": "img/productos/chocolate.webp",
-  "Proteína": "img/productos/proteina.webp",
-  "Bites": "img/productos/bites.webp",
-  "Bisglicinato de Magnesio": "img/productos/bisglicinato-de-magnesio.webp",
-  "Multimagnesio": "img/productos/multimagnesio.webp",
-  "Citrato de Magnesio": "img/productos/citrato-de-magnesio.webp",
-  "Magnesio": "img/productos/magnesio.webp",
-  "Calcio, Magnesio y Vitamina D3": "img/productos/calcio-magnesio-y-vitamina-d3.webp",
-  "Vitamina C, Zinc y Vitamina D": "img/productos/vitamina-c-zinc-y-vitamina-d.webp",
-  "Vitamina B12": "img/productos/vitamina-b12.webp",
-  "Colágeno Hidrolizado": "img/productos/colageno-hidrolizado.webp",
-  "Resveratrol": "img/productos/resveratrol.webp"
-};
-
 function precioPorUnidadTexto(p) {
   if (BLISTER_12.includes(p.nombre) && p.categoria === "Vita") {
     return ` <span class="precio-unidad">(${formatCurrency(p.precioVentaSinIVA / 12)} c/u)</span>`;
@@ -6311,6 +6706,7 @@ function enviarAvisoMarcaCliente(clienteId) {
   const msg = mensajeAvisoMarca.replace(/\{nombre\}/g, c.nombre);
   const tel = c.telefono ? c.telefono.replace(/\D/g, "") : "";
   if (!tel) return alert(`${c.nombre} no tiene teléfono cargado — tenés que avisarle por otro medio.`);
+  marcarMensajeEnviado(clienteId);
   window.open(`https://wa.me/54${tel}?text=${encodeURIComponent(msg)}`, "_blank");
   enviadosAvisoMarca.add(clienteId);
   renderVistaAvisoMarca();
@@ -7145,139 +7541,6 @@ const PRECIOS_DISTRIBUIDOR = {
   "Reishi": 9500,
 };
 
-function generarExcelModelo() {
-  if (!window.XLSX) {
-    const s = document.createElement("script");
-    s.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
-    s.onload = () => _crearExcelModelo();
-    document.head.appendChild(s);
-  } else {
-    _crearExcelModelo();
-  }
-}
-
-function _crearExcelModelo() {
-  const [y, m] = fechaResumen.split("-");
-  const mesNombre = new Date(parseInt(y), parseInt(m)-1, 1)
-    .toLocaleString("es-AR", { month: "long" });
-  const mesCapital = mesNombre.charAt(0).toUpperCase() + mesNombre.slice(1);
-
-  // Filtrar pedidos del mes seleccionado
-  const pedidosMes = orders.filter(o => {
-    if (o.borrador || o.eliminado) return false;
-    const partes = o.fecha.replace(/,.*/, '').split('/');
-    return parseInt(partes[1]) === parseInt(m) && partes[2] === y;
-  });
-
-  // Sumar cantidades por producto
-  const cantidades = {};
-  pedidosMes.forEach(o => {
-    o.items.forEach(i => {
-      cantidades[i.nombre] = (cantidades[i.nombre] || 0) + i.cantidad;
-    });
-  });
-
-  const wb = XLSX.utils.book_new();
-  const marcas = [...new Set(catalogActivo().map(p => p.categoria))].sort();
-
-  marcas.forEach(marca => {
-    const productos = catalogActivo().filter(p => p.categoria === marca);
-    if (productos.length === 0) return;
-
-    const dataRow = 7;
-    const lastRow = dataRow + productos.length - 1;
-
-    const rows = [];
-    rows.push([`${marca} - Margen de ganancia por producto`,"","","","","","","","","Resumen",""]);
-    rows.push([configNegocio.nombre,"","","","","","","","","Costo total",{f:`SUM(F${dataRow}:F${lastRow})`}]);
-    rows.push(["","","","","","","","","","Venta total",{f:`SUM(G${dataRow}:G${lastRow})`}]);
-    rows.push([`${mesCapital} ${y}`,"","","","","","","","","Ganancia total",{f:`SUM(H${dataRow}:H${lastRow})`}]);
-    rows.push(["Producto","Precio distribuidor","Precio comercio","Ganancia por unidad","Cantidad","Costo total","Venta total","Ganancia total","","Stock inicial","Stock actual"]);
-    rows.push(["","","","","","","","","","",""]);
-
-    productos.forEach((p, idx) => {
-      const r = dataRow + idx;
-      rows.push([
-        p.nombre,
-        costoDeProducto(p),
-        p.precioVentaSinIVA,
-        {f:`C${r}-B${r}`},
-        cantidades[p.nombre] || 0,
-        {f:`B${r}*E${r}`},
-        {f:`C${r}*E${r}`},
-        {f:`D${r}*E${r}`},
-        "",
-        "",
-        p.stock
-      ]);
-    });
-
-    rows.push(["TOTAL","","","",
-      {f:`SUM(E${dataRow}:E${lastRow})`},
-      {f:`SUM(F${dataRow}:F${lastRow})`},
-      {f:`SUM(G${dataRow}:G${lastRow})`},
-      {f:`SUM(H${dataRow}:H${lastRow})`},
-      "","",""
-    ]);
-
-    const ws = XLSX.utils.aoa_to_sheet(rows);
-    ws["!cols"] = [28,16,14,16,10,14,14,14,4,12,12].map(w => ({wch:w}));
-    XLSX.utils.book_append_sheet(wb, ws, `${marca} - ${mesCapital}`);
-  });
-
-  XLSX.writeFile(wb, `Ventas_${mesCapital}_${y}_${nombreArchivoNegocio()}.xlsx`);
-}
-
-function exportarExcelDia(fecha) {
-  if (!window.XLSX) {
-    const s = document.createElement("script");
-    s.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
-    s.onload = () => generarExcel(fecha);
-    document.head.appendChild(s);
-  } else {
-    generarExcel(fecha);
-  }
-}
-
-function generarExcel(fecha) {
-  const pedidosDia = orders.filter(o => !o.borrador && !o.eliminado && o.fecha.startsWith(fecha));
-  if (pedidosDia.length === 0) return alert("No hay ventas para esa fecha.");
-
-  // Hoja 1: Detalle
-  const detalle = [["Fecha","Cliente","Tipo","Producto","Marca","Cantidad","Precio s/IVA","Subtotal s/IVA"]];
-  pedidosDia.forEach(o => {
-    o.items.forEach(i => {
-      detalle.push([o.fecha, o.client.nombre, o.client.tipo||"", i.nombre, i.categoria, i.cantidad, i.precioVentaSinIVA, i.subtotalSinIVA]);
-    });
-  });
-
-  // Hoja 2: Resumen por producto
-  const agg = {};
-  pedidosDia.forEach(o => {
-    o.items.forEach(i => {
-      if (!agg[i.nombre]) agg[i.nombre] = { marca: i.categoria, cantidad: 0, total: 0 };
-      agg[i.nombre].cantidad += i.cantidad;
-      agg[i.nombre].total += i.subtotalSinIVA;
-    });
-  });
-  const resumen = [["Producto","Marca","Unidades vendidas","Total s/IVA"]];
-  Object.entries(agg).sort((a,b) => b[1].cantidad - a[1].cantidad)
-    .forEach(([nombre, p]) => resumen.push([nombre, p.marca, p.cantidad, p.total]));
-  const lastRow = resumen.length + 1;
-  resumen.push(["TOTAL", "", `=SUM(C2:C${lastRow-1})`, `=SUM(D2:D${lastRow-1})`]);
-
-  const wb = XLSX.utils.book_new();
-  const ws1 = XLSX.utils.aoa_to_sheet(resumen);
-  const ws2 = XLSX.utils.aoa_to_sheet(detalle);
-  ws1['!cols'] = [28,12,18,16].map(w => ({wch:w}));
-  ws2['!cols'] = [18,20,12,28,12,10,16,16].map(w => ({wch:w}));
-  XLSX.utils.book_append_sheet(wb, ws1, "Resumen del día");
-  XLSX.utils.book_append_sheet(wb, ws2, "Detalle ventas");
-
-  const [d,m,y] = fecha.split("/");
-  XLSX.writeFile(wb, `Ventas_${d}-${m}-${y}_${nombreArchivoNegocio()}.xlsx`);
-}
-
 // ── Indicador online/offline ──────────────────────────────────────────────
 function initOfflineIndicator() {
   const bar = document.createElement("div");
@@ -7551,6 +7814,16 @@ function initBloqueo() {
 // todo, con un "id" que sea la fecha (AAAA-MM-DD; si hay dos el mismo día,
 // AAAA-MM-DD-2). Cada celular se acuerda de la última que vio.
 const NOVEDADES = [
+  {
+    id: "2026-11-25",
+    titulo: "Novedades de fin de noviembre",
+    items: [
+      "💰 <strong>Saldo a favor:</strong> si un cliente te paga de más, la diferencia le queda a favor y se descuenta sola de lo próximo que te compre.",
+      "💵 <strong>Avisar pago desde el pedido:</strong> ahora podés poner el monto que te dieron de verdad, aunque no sea justo el total.",
+      "📱 <strong>Mensajes a clientes:</strong> en 📱 Mensajes podés dejar guardado un texto, ponerle a cada cliente su propio saludo y mandarlo de a uno.",
+      "📊 <strong>Productos vendidos más simple:</strong> se sacaron los botones Día y Mensual y las fotos de productos."
+    ]
+  },
   {
     id: "2026-11-17",
     titulo: "Novedades de noviembre",
